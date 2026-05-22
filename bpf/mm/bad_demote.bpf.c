@@ -1,13 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
 #include "../include/contract_mm.bpf.h"
 
-/*
- * Intentionally harmful M5 policy model. The current kernel-side M5 hook
- * validates decisions through debugfs/QEMU; this source documents the bad
- * policy shape that later BPF loading will replace.
- */
-int contract_bad_demote_decide(const struct contract_mm_region_state *state)
+SEC("syscall")
+int contract_bad_demote_decide(void *ctx)
 {
-    (void)state;
+    const struct contract_mm_region_state *state = contract_mm_state_get();
+
+    (void)ctx;
+    if (!state)
+        return CONTRACT_MM_NO_OP;
     return CONTRACT_MM_DEMOTE;
 }
+
+char LICENSE[] SEC("license") = "GPL";

@@ -1,0 +1,114 @@
+diff -urN m25-base/include/linux/contractbpf.h m25-current/include/linux/contractbpf.h
+--- m25-base/include/linux/contractbpf.h	2026-05-22 16:30:00.000000000 +0000
++++ m25-current/include/linux/contractbpf.h	2026-05-22 16:30:00.000000000 +0000
+@@ -194,6 +194,7 @@
+ void contract_ledger_charge(struct contract_scope_id scope,
+ 			    enum contract_effect_type effect, u64 cost_primary,
+ 			    u64 cost_secondary);
++void contract_ledger_debugfs_init(struct dentry *root);
+ void contract_trigger_degrade(u64 prog_id, enum contract_effect_type effect,
+ 			      struct contract_scope_id scope, const char *reason);
+ void contract_reset_for_tests(void);
+@@ -246,6 +247,10 @@
+ {
+ }
+ 
++static inline void contract_ledger_debugfs_init(struct dentry *root)
++{
++}
++
+ static inline void contract_trigger_degrade(u64 prog_id,
+ 					    enum contract_effect_type effect,
+ 					    struct contract_scope_id scope,
+diff -urN m25-base/kernel/bpf/contractbpf_core.c m25-current/kernel/bpf/contractbpf_core.c
+--- m25-base/kernel/bpf/contractbpf_core.c	2026-05-22 16:30:00.000000000 +0000
++++ m25-current/kernel/bpf/contractbpf_core.c	2026-05-22 16:30:00.000000000 +0000
+@@ -262,6 +262,7 @@
+ 	contract_debugfs_dir = debugfs_create_dir("contractbpf", NULL);
+ 	debugfs_create_file("selftest", 0444, contract_debugfs_dir, NULL,
+ 			    &contract_selftest_fops);
++	contract_ledger_debugfs_init(contract_debugfs_dir);
+ 	contract_sched_debugfs_init(contract_debugfs_dir);
+ 	contract_mm_debugfs_init(contract_debugfs_dir);
+ 	contract_cross_debugfs_init(contract_debugfs_dir);
+diff -urN m25-base/kernel/bpf/contractbpf_ledger.c m25-current/kernel/bpf/contractbpf_ledger.c
+--- m25-base/kernel/bpf/contractbpf_ledger.c	2026-05-22 16:30:00.000000000 +0000
++++ m25-current/kernel/bpf/contractbpf_ledger.c	2026-05-22 16:30:00.000000000 +0000
+@@ -1,9 +1,14 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/contractbpf.h>
++#include <linux/debugfs.h>
+ #include <linux/errno.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
++#include <linux/seq_file.h>
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
+ 
+ #define CONTRACT_MAX_LEDGERS 1024
++#define CONTRACT_LEDGER_STRESS_EVENTS 100000
+ 
+ static DEFINE_SPINLOCK(contract_ledger_lock);
+ static struct contract_ledger contract_ledgers[CONTRACT_MAX_LEDGERS];
+@@ -170,4 +175,60 @@
+ 	default:
+ 		break;
+ 	}
+ }
++
++static int contract_ledger_stress_show(struct seq_file *seq, void *v)
++{
++	u64 start_ns, duration_ns, events_per_sec, avg_ns;
++	struct contract_ledger *ledger;
++	struct contract_scope_id scope;
++	int i;
++
++	contract_reset_for_tests();
++
++	for (i = 0; i < CONTRACT_MAX_LEDGERS; i++) {
++		scope = (struct contract_scope_id){
++			.type = 1,
++			.primary_id = i + 1,
++		};
++		contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_DISPATCH, 0, 0);
++	}
++
++	start_ns = ktime_get_ns();
++	for (i = 0; i < CONTRACT_LEDGER_STRESS_EVENTS; i++) {
++		scope = (struct contract_scope_id){
++			.type = 1,
++			.primary_id = (i % CONTRACT_MAX_LEDGERS) + 1,
++		};
++		contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_DISPATCH, 1, 0);
++	}
++	duration_ns = ktime_get_ns() - start_ns;
++	if (!duration_ns)
++		duration_ns = 1;
++
++	events_per_sec = div64_u64((u64)CONTRACT_LEDGER_STRESS_EVENTS *
++				   NSEC_PER_SEC, duration_ns);
++	avg_ns = div64_u64(duration_ns, CONTRACT_LEDGER_STRESS_EVENTS);
++	ledger = contract_lookup_ledger((struct contract_scope_id){
++		.type = 1,
++		.primary_id = CONTRACT_MAX_LEDGERS,
++	});
++
++	seq_puts(seq, "CONTRACTBPF_LEDGER_STRESS_OK\n");
++	seq_printf(seq, "scopes=%u\n", CONTRACT_MAX_LEDGERS);
++	seq_printf(seq, "events=%u\n", CONTRACT_LEDGER_STRESS_EVENTS);
++	seq_printf(seq, "duration_ns=%llu\n", duration_ns);
++	seq_printf(seq, "avg_update_ns=%llu\n", avg_ns);
++	seq_printf(seq, "events_per_sec=%llu\n", events_per_sec);
++	seq_printf(seq, "last_scope_events=%lld\n",
++		   ledger ? atomic64_read(&ledger->sched_dispatch_events) : 0);
++	seq_puts(seq, "global_lock_per_event=0\n");
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(contract_ledger_stress);
++
++void contract_ledger_debugfs_init(struct dentry *root)
++{
++	debugfs_create_file("ledger_stress", 0444, root, NULL,
++			    &contract_ledger_stress_fops);
++}

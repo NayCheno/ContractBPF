@@ -1,0 +1,28 @@
+diff -urN m14-base/kernel/bpf/contractbpf_mm.c m14-current/kernel/bpf/contractbpf_mm.c
+--- m14-base/kernel/bpf/contractbpf_mm.c	2026-05-22 13:45:00.000000000 +0000
++++ m14-current/kernel/bpf/contractbpf_mm.c	2026-05-22 13:45:00.000000000 +0000
+@@ -182,7 +182,7 @@
+ 			atomic64_inc(&contract_mm_no_op_decisions);
+ 		}
+ 
+-		if (contract_mm_validate_decision(CONTRACT_MM_RECLAIM_HINT, 1) !=
++		if (contract_mm_validate_decision(scope, CONTRACT_MM_RECLAIM_HINT, 1) !=
+ 		    CONTRACT_MM_RECLAIM_HINT)
+ 			atomic64_inc(&contract_mm_no_op_decisions);
+ 	}
+@@ -206,6 +206,6 @@
+ 	enable = buf[0] != '0';
+ 	contract_mm_gate_enabled = enable;
+ 	if (enable)
+-		contract_mm_install_tokens();
++		contract_mm_install_tokens(contract_mm_scope());
+ 	return count;
+ }
+@@ -246,6 +246,6 @@
+ 
+ 	contract_mm_demote_budget = budget;
+ 	if (contract_mm_gate_enabled)
+-		contract_mm_install_tokens();
++		contract_mm_install_tokens(contract_mm_scope());
+ 	return count;
+ }

@@ -102,10 +102,14 @@ artifacts/logs/**
 artifacts/builds/**
 artifacts/traces/**
 artifacts/qemu/**
+artifacts/repro/**
 !artifacts/logs/.gitkeep
 !artifacts/builds/.gitkeep
 !artifacts/traces/.gitkeep
 !artifacts/qemu/.gitkeep
+!artifacts/repro/.gitkeep
+experiments/artifact_bundles/*.tar
+experiments/artifact_bundles/*.tar.*
 
 # Logs and temporary files
 *.log

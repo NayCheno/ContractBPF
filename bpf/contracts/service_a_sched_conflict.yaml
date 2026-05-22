@@ -1,0 +1,22 @@
+policy: latency_sched_A
+subsystem: sched_ext
+scope:
+  type: cgroup
+  id: service-A
+effects:
+  - name: boost_task
+    budget:
+      max_boosts_per_epoch: 20000
+      max_queue_delay_us: 100000
+    degrade:
+      level1: throttle_boost
+      level2: revoke_boost
+      level3: disable_scheduler
+  - name: dispatch_task
+    budget:
+      max_dispatch_failures_per_epoch: 8
+      max_starvation_window_us: 20000
+    degrade:
+      level1: drain_dsq
+      level2: revoke_dispatch_modification
+      level3: disable_scheduler

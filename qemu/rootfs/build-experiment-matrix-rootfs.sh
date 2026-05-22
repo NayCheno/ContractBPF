@@ -6,6 +6,7 @@ WORK="$ROOT/build/experiment-matrix-initramfs"
 OUT="$ROOT/qemu/images/experiment-matrix-initramfs.cpio.gz"
 SCX_BOOST="${SCX_BOOST:-$ROOT/build/scx/build/bin/scx_contract_boost}"
 SYNTH="${SYNTH:-$ROOT/workloads/synthetic_phase_service/synthetic_phase_service}"
+CONTRACTCTL="${CONTRACTCTL:-$ROOT/userspace/contractctl/target/debug/contractctl}"
 CC_BIN="${CC:-cc}"
 
 copy_one() {
@@ -45,6 +46,12 @@ if [ ! -x "$SYNTH" ]; then
     exit 1
 fi
 
+if [ ! -x "$CONTRACTCTL" ]; then
+    echo "ERROR: contractctl missing: $CONTRACTCTL" >&2
+    echo "Run: cargo build --manifest-path $ROOT/userspace/contractctl/Cargo.toml" >&2
+    exit 1
+fi
+
 for tool in "$CC_BIN" cpio gzip ldd awk; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool missing: $tool" >&2
@@ -53,7 +60,7 @@ for tool in "$CC_BIN" cpio gzip ldd awk; do
 done
 
 rm -rf "$WORK"
-mkdir -p "$WORK/bin" "$WORK/dev" "$WORK/proc" "$WORK/sys/kernel/debug" "$WORK/sys/fs/cgroup" "$WORK/tmp" "$WORK/usr/local/bin" "$(dirname "$OUT")"
+mkdir -p "$WORK/bin" "$WORK/dev" "$WORK/etc/contractbpf" "$WORK/proc" "$WORK/sys/kernel/debug" "$WORK/sys/fs/cgroup" "$WORK/tmp" "$WORK/usr/local/bin" "$(dirname "$OUT")"
 
 "$CC_BIN" -Os -static -Wall -Wextra -o "$WORK/bin/poweroff-contractbpf" "$ROOT/qemu/rootfs/poweroff.c"
 chmod 0755 "$WORK/bin/poweroff-contractbpf"
@@ -66,6 +73,11 @@ copy_bin /bin/mount
 copy_bin /bin/sleep
 copy_bin "$SCX_BOOST" /usr/local/bin/scx_contract_boost
 copy_bin "$SYNTH" /usr/local/bin/synthetic_phase_service
+copy_bin "$CONTRACTCTL" /usr/local/bin/contractctl
+cp "$ROOT/bpf/contracts/service_a_sched.yaml" "$WORK/etc/contractbpf/service_a_sched.yaml"
+cp "$ROOT/bpf/contracts/service_a_paging.yaml" "$WORK/etc/contractbpf/service_a_paging.yaml"
+cp "$ROOT/bpf/contracts/service_b_sched.yaml" "$WORK/etc/contractbpf/service_b_sched.yaml"
+cp "$ROOT/bpf/contracts/service_b_paging.yaml" "$WORK/etc/contractbpf/service_b_paging.yaml"
 
 cp "$ROOT/qemu/rootfs/matrix-init.sh" "$WORK/init"
 chmod 0755 "$WORK/init"

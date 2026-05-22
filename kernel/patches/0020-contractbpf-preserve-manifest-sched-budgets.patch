@@ -1,0 +1,95 @@
+diff -urN m20-base/include/linux/contractbpf.h m20-current/include/linux/contractbpf.h
+--- m20-base/include/linux/contractbpf.h	2026-05-22 15:15:00.000000000 +0000
++++ m20-current/include/linux/contractbpf.h	2026-05-22 15:15:00.000000000 +0000
+@@ -208,6 +208,8 @@
+ 				    u64 *policy_id);
+ int contract_mm_test_hook(u32 pages, u32 *decision, u32 *allowed,
+ 			  struct contract_scope_id *scope);
++bool contract_token_registered(u64 prog_id, enum contract_effect_type effect,
++			       struct contract_scope_id scope);
+ struct contract_scope_id contract_service_scope(void);
+ void contract_cross_check(struct contract_scope_id scope);
+ u64 contract_effect_policy_id(enum contract_effect_type effect);
+@@ -303,6 +305,13 @@
+ 	return -EOPNOTSUPP;
+ }
+ 
++static inline bool contract_token_registered(u64 prog_id,
++					     enum contract_effect_type effect,
++					     struct contract_scope_id scope)
++{
++	return false;
++}
++
+ static inline struct contract_scope_id contract_service_scope(void)
+ {
+ 	return (struct contract_scope_id){};
+diff -urN m20-base/kernel/bpf/contractbpf_core.c m20-current/kernel/bpf/contractbpf_core.c
+--- m20-base/kernel/bpf/contractbpf_core.c	2026-05-22 15:15:00.000000000 +0000
++++ m20-current/kernel/bpf/contractbpf_core.c	2026-05-22 15:15:00.000000000 +0000
+@@ -80,6 +80,19 @@
+ 	return contract_effect_policy_id(effect);
+ }
+ 
++bool contract_token_registered(u64 prog_id, enum contract_effect_type effect,
++			       struct contract_scope_id scope)
++{
++	struct contract_effect_token *token;
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_token_lock, flags);
++	token = contract_lookup_token(prog_id, effect, scope);
++	spin_unlock_irqrestore(&contract_token_lock, flags);
++
++	return token != NULL;
++}
++
+ int contract_register_token(const struct contract_effect_token *token)
+ {
+ 	struct contract_effect_token *existing;
+diff -urN m20-base/kernel/bpf/contractbpf_sched.c m20-current/kernel/bpf/contractbpf_sched.c
+--- m20-base/kernel/bpf/contractbpf_sched.c	2026-05-22 15:15:00.000000000 +0000
++++ m20-current/kernel/bpf/contractbpf_sched.c	2026-05-22 15:15:00.000000000 +0000
+@@ -51,6 +51,8 @@
+ 	struct contract_scope_id scope = contract_task_scope(p);
+ 	struct contract_ledger *ledger;
+ 	u64 queue_delay_us = 0;
++	u64 dispatch_policy;
++	u64 boost_policy;
+ 	int ret;
+ 
+ 	if (!contract_sched_gate_enabled)
+@@ -60,11 +62,19 @@
+ 	    !contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope))
+ 		return;
+ 
+-	contract_sched_install_tokens(scope);
++	dispatch_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH,
++							     scope);
++	boost_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST,
++							   scope);
++	if (!contract_token_registered(dispatch_policy, CONTRACT_EFFECT_SCHED_DISPATCH,
++				       scope) ||
++	    !contract_token_registered(boost_policy, CONTRACT_EFFECT_SCHED_BOOST,
++				       scope))
++		contract_sched_install_tokens(scope);
+ 
+ 	ret = contract_effect_gate(
+-				   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH, scope),
+-				   CONTRACT_EFFECT_SCHED_DISPATCH, scope, 1, 0);
++				   dispatch_policy, CONTRACT_EFFECT_SCHED_DISPATCH,
++				   scope, 1, 0);
+ 	if (ret == CONTRACT_DENY)
+ 		contract_ledger_charge(scope,
+ 				       CONTRACT_EFFECT_SCHED_DISPATCH, 1, 0);
+@@ -76,8 +86,8 @@
+ 		queue_delay_us = jiffies_to_usecs(jiffies - p->scx.runnable_at);
+ 
+ 	ret = contract_effect_gate(
+-				   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope),
+-				   CONTRACT_EFFECT_SCHED_BOOST, scope, 1,
++				   boost_policy, CONTRACT_EFFECT_SCHED_BOOST,
++				   scope, 1,
+ 				   queue_delay_us);
+ 	contract_cross_check(scope);
+ 	if (ret == CONTRACT_ALLOW)

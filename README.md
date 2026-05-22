@@ -75,16 +75,23 @@ optional KVM acceleration notes.
 
 ## Current status
 
-This is a **paper-planning and drafting package**, not a completed artifact. The LaTeX paper is written as a serious NSDI-facing draft with placeholders for measured results. The most important missing piece is a real implementation and convincing scheduler-paging conflict experiments on networked services.
+This repository now contains a working QEMU artifact, not just a paper plan. The
+artifact builds a patched kernel, exercises sched_ext and a conservative
+paging-effect hook, and validates the current ContractBPF mechanism with QEMU
+synthetic and memcached matrices. These results are correctness and
+reproducibility evidence, not bare-metal or production performance evidence.
+The most important missing piece is still non-QEMU same-load quantitative
+evidence for latency-sensitive networked services, followed by a final
+paper/evidence audit against those runs.
 
 ## Recommended immediate decision
 
 Proceed toward NSDI 2027 Fall only if the team can produce by **2026-08-21**:
 
-1. a working sched_ext effect gate,
-2. a working paging decision hook or a clearly justified PageFlex-style prototype,
-3. at least one reproducible conflict on a latency-sensitive networked service,
-4. one bounded-degradation recovery result,
-5. initial overhead numbers.
+1. same-load non-QEMU/bare-metal P5 conflict bars for a latency-sensitive networked service,
+2. same-load non-QEMU/bare-metal P6 bounded-degradation recovery bars,
+3. production-like no-violation overhead and scalability measurements,
+4. a final archive tying raw logs, processed data, figures, and paper claims together,
+5. a paper audit that does not conflate QEMU correctness evidence with production performance.
 
 If this bar is not met, move the target to OSDI 2027 rather than submitting an under-evaluated NSDI paper.

@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     memcached \
     musl-tools \
     ninja-build \
+    openssh-client \
     openssl \
     patch \
     pkg-config \
@@ -71,7 +72,8 @@ RUN curl -fsSL https://sh.rustup.rs \
     | CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup RUSTUP_INIT_SKIP_PATH_CHECK=yes \
       sh -s -- -y --profile minimal --default-toolchain stable \
     && /opt/cargo/bin/rustc --version \
-    && /opt/cargo/bin/cargo --version
+    && /opt/cargo/bin/cargo --version \
+    && /opt/cargo/bin/rustup component add rustfmt
 
 WORKDIR /workspace
 

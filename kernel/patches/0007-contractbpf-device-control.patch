@@ -1,0 +1,224 @@
+diff -urN m7-base/include/linux/contractbpf.h m7-current/include/linux/contractbpf.h
+--- m7-base/include/linux/contractbpf.h	2026-05-22 12:05:00.000000000 +0000
++++ m7-current/include/linux/contractbpf.h	2026-05-22 12:05:00.000000000 +0000
+@@ -4,6 +4,7 @@
+ 
+ #include <linux/atomic.h>
+ #include <linux/errno.h>
++#include <linux/ioctl.h>
+ #include <linux/types.h>
+ 
+ struct dentry;
+@@ -74,6 +75,49 @@
+ 	CONTRACT_MM_NO_OP,
+ };
+ 
++#define CONTRACTBPF_IOC_MAGIC 0xcb
++
++struct contract_ioctl_scope {
++	u32 scope_type;
++	u32 reserved;
++	u64 primary_id;
++	u64 secondary_id;
++};
++
++struct contract_ioctl_token {
++	u64 prog_id;
++	u32 effect;
++	u32 reserved;
++	struct contract_ioctl_scope scope;
++	u64 budget_primary;
++	u64 budget_secondary;
++	u64 epoch_ns;
++	u32 degrade_state;
++	u32 reserved2;
++};
++
++struct contract_ioctl_snapshot {
++	struct contract_ioctl_scope scope;
++	u64 sched_queue_delay_us;
++	u64 sched_dispatch_events;
++	u64 sched_dispatch_failures;
++	u64 sched_boost_events;
++	u64 pages_demoted;
++	u64 reclaim_hints;
++	u64 refault_events;
++	u64 major_fault_events;
++	u64 fault_latency_us;
++	u64 violations;
++	u32 degrade_state[CONTRACT_EFFECT_MAX];
++};
++
++#define CONTRACTBPF_IOC_INSTALL_TOKEN \
++	_IOW(CONTRACTBPF_IOC_MAGIC, 1, struct contract_ioctl_token)
++#define CONTRACTBPF_IOC_GET_LEDGER \
++	_IOWR(CONTRACTBPF_IOC_MAGIC, 2, struct contract_ioctl_snapshot)
++#define CONTRACTBPF_IOC_RESET_TEST \
++	_IO(CONTRACTBPF_IOC_MAGIC, 3)
++
+ #ifdef CONFIG_CONTRACTBPF
+ int contract_register_token(const struct contract_effect_token *token);
+ int contract_effect_gate(u64 prog_id, enum contract_effect_type effect,
+diff -urN m7-base/kernel/bpf/Makefile m7-current/kernel/bpf/Makefile
+--- m7-base/kernel/bpf/Makefile	2026-05-22 12:05:00.000000000 +0000
++++ m7-current/kernel/bpf/Makefile	2026-05-22 12:05:00.000000000 +0000
+@@ -7,5 +7,5 @@
+ CFLAGS_core.o += -Wno-override-init $(cflags-nogcse-yy)
+ 
+ obj-$(CONFIG_BPF_SYSCALL) += syscall.o verifier.o inode.o helpers.o tnum.o log.o token.o
+-obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o contractbpf_mm.o contractbpf_cross.o
++obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o contractbpf_mm.o contractbpf_cross.o contractbpf_control.o
+ obj-$(CONFIG_BPF_SYSCALL) += bpf_iter.o map_iter.o task_iter.o prog_iter.o link_iter.o
+diff -urN m7-base/kernel/bpf/contractbpf_control.c m7-current/kernel/bpf/contractbpf_control.c
+--- m7-base/kernel/bpf/contractbpf_control.c	1970-01-01 00:00:00.000000000 +0000
++++ m7-current/kernel/bpf/contractbpf_control.c	2026-05-22 12:05:00.000000000 +0000
+@@ -0,0 +1,149 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Minimal non-debugfs ContractBPF control channel.
++ *
++ * This device is intentionally small: userspace can install effect tokens,
++ * read one ledger snapshot, and reset test state. Debugfs remains available
++ * for development selftests, but contractctl/contractd can use this path for
++ * policy lifecycle operations when /dev/contractbpf exists.
++ */
++#include <linux/contractbpf.h>
++#include <linux/errno.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/uaccess.h>
++
++static struct contract_scope_id
++contract_scope_from_ioctl(const struct contract_ioctl_scope *scope)
++{
++	return (struct contract_scope_id){
++		.type = scope->scope_type,
++		.primary_id = scope->primary_id,
++		.secondary_id = scope->secondary_id,
++	};
++}
++
++static void contract_scope_to_ioctl(struct contract_ioctl_scope *dst,
++				    struct contract_scope_id src)
++{
++	dst->scope_type = src.type;
++	dst->reserved = 0;
++	dst->primary_id = src.primary_id;
++	dst->secondary_id = src.secondary_id;
++}
++
++static long contract_ioctl_install_token(unsigned long arg)
++{
++	struct contract_ioctl_token user_token;
++	struct contract_effect_token token;
++
++	if (copy_from_user(&user_token, (void __user *)arg, sizeof(user_token)))
++		return -EFAULT;
++
++	if (user_token.effect >= CONTRACT_EFFECT_MAX)
++		return -EINVAL;
++
++	token = (struct contract_effect_token){
++		.prog_id = user_token.prog_id,
++		.scope = contract_scope_from_ioctl(&user_token.scope),
++		.effect = user_token.effect,
++		.budget_primary = user_token.budget_primary,
++		.budget_secondary = user_token.budget_secondary,
++		.epoch_ns = user_token.epoch_ns,
++		.degrade_state = user_token.degrade_state,
++	};
++
++	return contract_register_token(&token);
++}
++
++static void contract_snapshot_from_ledger(struct contract_ioctl_snapshot *snap,
++					  struct contract_ledger *ledger)
++{
++	int i;
++
++	memset(snap, 0, sizeof(*snap));
++	if (!ledger)
++		return;
++
++	contract_scope_to_ioctl(&snap->scope, ledger->scope);
++	snap->sched_queue_delay_us =
++		atomic64_read(&ledger->sched_queue_delay_us);
++	snap->sched_dispatch_events =
++		atomic64_read(&ledger->sched_dispatch_events);
++	snap->sched_dispatch_failures =
++		atomic64_read(&ledger->sched_dispatch_failures);
++	snap->sched_boost_events =
++		atomic64_read(&ledger->sched_boost_events);
++	snap->pages_demoted = atomic64_read(&ledger->pages_demoted);
++	snap->reclaim_hints = atomic64_read(&ledger->reclaim_hints);
++	snap->refault_events = atomic64_read(&ledger->refault_events);
++	snap->major_fault_events =
++		atomic64_read(&ledger->major_fault_events);
++	snap->fault_latency_us = atomic64_read(&ledger->fault_latency_us);
++	snap->violations = atomic64_read(&ledger->violations);
++
++	for (i = 0; i < CONTRACT_EFFECT_MAX; i++)
++		snap->degrade_state[i] = ledger->degrade_state[i];
++}
++
++static long contract_ioctl_get_ledger(unsigned long arg)
++{
++	struct contract_ioctl_snapshot snap;
++	struct contract_scope_id scope;
++	struct contract_ledger *ledger;
++
++	if (copy_from_user(&snap, (void __user *)arg, sizeof(snap)))
++		return -EFAULT;
++
++	scope = contract_scope_from_ioctl(&snap.scope);
++	ledger = contract_lookup_ledger(scope);
++	contract_snapshot_from_ledger(&snap, ledger);
++
++	if (copy_to_user((void __user *)arg, &snap, sizeof(snap)))
++		return -EFAULT;
++
++	return 0;
++}
++
++static long contractbpf_ioctl(struct file *file, unsigned int cmd,
++			      unsigned long arg)
++{
++	switch (cmd) {
++	case CONTRACTBPF_IOC_INSTALL_TOKEN:
++		return contract_ioctl_install_token(arg);
++	case CONTRACTBPF_IOC_GET_LEDGER:
++		return contract_ioctl_get_ledger(arg);
++	case CONTRACTBPF_IOC_RESET_TEST:
++		contract_reset_for_tests();
++		return 0;
++	default:
++		return -ENOTTY;
++	}
++}
++
++static const struct file_operations contractbpf_fops = {
++	.owner = THIS_MODULE,
++	.unlocked_ioctl = contractbpf_ioctl,
++	.compat_ioctl = compat_ptr_ioctl,
++};
++
++static struct miscdevice contractbpf_miscdev = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "contractbpf",
++	.fops = &contractbpf_fops,
++	.mode = 0600,
++};
++
++static int __init contractbpf_control_init(void)
++{
++	int ret;
++
++	ret = misc_register(&contractbpf_miscdev);
++	if (ret)
++		pr_warn("contractbpf: failed to register /dev/contractbpf: %d\n",
++			ret);
++	return ret;
++}
++late_initcall(contractbpf_control_init);

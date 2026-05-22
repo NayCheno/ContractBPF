@@ -1,0 +1,16 @@
+diff -urN m10-base/kernel/bpf/contractbpf_mm.c m10-current/kernel/bpf/contractbpf_mm.c
+--- m10-base/kernel/bpf/contractbpf_mm.c	2026-05-22 12:50:00.000000000 +0000
++++ m10-current/kernel/bpf/contractbpf_mm.c	2026-05-22 12:50:00.000000000 +0000
+@@ -296,6 +296,12 @@
+ 
+ 	seq_puts(seq, "prototype_path=1\n");
+ 	seq_printf(seq, "enabled=%u\n", contract_mm_gate_enabled);
++	seq_printf(seq, "policy_id=%llu\n",
++		   contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE));
++	seq_printf(seq, "scope=%u:%llu:%llu\n",
++		   contract_mm_scope().type,
++		   contract_mm_scope().primary_id,
++		   contract_mm_scope().secondary_id);
+ 	seq_printf(seq, "demote_budget=%llu\n", contract_mm_demote_budget);
+ 	seq_printf(seq, "throttled_demotes=%lld\n",
+ 		   atomic64_read(&contract_mm_throttled_demotes));

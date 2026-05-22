@@ -1,0 +1,167 @@
+diff -urN m16-base/include/linux/contractbpf.h m16-current/include/linux/contractbpf.h
+--- m16-base/include/linux/contractbpf.h	2026-05-22 14:15:00.000000000 +0000
++++ m16-current/include/linux/contractbpf.h	2026-05-22 14:15:00.000000000 +0000
+@@ -66,6 +66,11 @@
+ 	CONTRACT_MM_NO_OP,
+ };
+ 
++enum contract_ioctl_subsystem {
++	CONTRACTBPF_SUBSYS_SCHED = 1,
++	CONTRACTBPF_SUBSYS_MM = 2,
++};
++
+ #define CONTRACTBPF_IOC_MAGIC 0xcb
+ 
+ struct contract_ioctl_scope {
+@@ -94,6 +99,13 @@
+ 	u32 reserved2;
+ };
+ 
++struct contract_ioctl_gate {
++	u32 subsystem;
++	u32 enabled;
++	u32 reserved;
++	u32 reserved2;
++};
++
+ struct contract_ioctl_snapshot {
+ 	struct contract_ioctl_scope scope;
+ 	u64 sched_queue_delay_us;
+@@ -118,6 +130,8 @@
+ 	_IO(CONTRACTBPF_IOC_MAGIC, 3)
+ #define CONTRACTBPF_IOC_CHARGE_EFFECT \
+ 	_IOWR(CONTRACTBPF_IOC_MAGIC, 4, struct contract_ioctl_charge)
++#define CONTRACTBPF_IOC_SET_GATE \
++	_IOW(CONTRACTBPF_IOC_MAGIC, 5, struct contract_ioctl_gate)
+ 
+ #ifdef CONFIG_CONTRACTBPF
+ int contract_register_token(const struct contract_effect_token *token);
+@@ -135,10 +149,12 @@
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+ 				 u64 *effective_slice);
+ void contract_sched_debugfs_init(struct dentry *root);
++void contract_sched_set_enabled(bool enabled);
+ bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages);
+ void contract_mm_record_refault(struct folio *folio);
+ void contract_mm_record_major_fault(u64 latency_us);
+ void contract_mm_debugfs_init(struct dentry *root);
++void contract_mm_set_enabled(bool enabled);
+ struct contract_scope_id contract_service_scope(void);
+ void contract_cross_check(struct contract_scope_id scope);
+ u64 contract_effect_policy_id(enum contract_effect_type effect);
+@@ -209,6 +225,10 @@
+ {
+ }
+ 
++static inline void contract_sched_set_enabled(bool enabled)
++{
++}
++
+ static inline bool contract_mm_demote_allowed(struct folio *folio,
+ 					      unsigned int nr_pages)
+ {
+@@ -227,6 +247,10 @@
+ {
+ }
+ 
++static inline void contract_mm_set_enabled(bool enabled)
++{
++}
++
+ static inline struct contract_scope_id contract_service_scope(void)
+ {
+ 	return (struct contract_scope_id){};
+diff -urN m16-base/kernel/bpf/contractbpf_control.c m16-current/kernel/bpf/contractbpf_control.c
+--- m16-base/kernel/bpf/contractbpf_control.c	2026-05-22 14:15:00.000000000 +0000
++++ m16-current/kernel/bpf/contractbpf_control.c	2026-05-22 14:15:00.000000000 +0000
+@@ -121,6 +121,27 @@
+ 
+ 	return 0;
+ }
++
++static long contract_ioctl_set_gate(unsigned long arg)
++{
++	struct contract_ioctl_gate gate;
++	bool enabled;
++
++	if (copy_from_user(&gate, (void __user *)arg, sizeof(gate)))
++		return -EFAULT;
++
++	enabled = gate.enabled != 0;
++	switch (gate.subsystem) {
++	case CONTRACTBPF_SUBSYS_SCHED:
++		contract_sched_set_enabled(enabled);
++		return 0;
++	case CONTRACTBPF_SUBSYS_MM:
++		contract_mm_set_enabled(enabled);
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
+ 
+ static long contractbpf_ioctl(struct file *file, unsigned int cmd,
+ 			      unsigned long arg)
+@@ -138,6 +159,8 @@
+ 		return 0;
+ 	case CONTRACTBPF_IOC_CHARGE_EFFECT:
+ 		return contract_ioctl_charge_effect(arg);
++	case CONTRACTBPF_IOC_SET_GATE:
++		return contract_ioctl_set_gate(arg);
+ 	default:
+ 		return -ENOTTY;
+ 	}
+diff -urN m16-base/kernel/bpf/contractbpf_mm.c m16-current/kernel/bpf/contractbpf_mm.c
+--- m16-base/kernel/bpf/contractbpf_mm.c	2026-05-22 14:15:00.000000000 +0000
++++ m16-current/kernel/bpf/contractbpf_mm.c	2026-05-22 14:15:00.000000000 +0000
+@@ -61,6 +61,13 @@
+ 	contract_register_token(&reclaim_hint);
+ }
+ 
++void contract_mm_set_enabled(bool enabled)
++{
++	contract_mm_gate_enabled = enabled;
++	if (enabled)
++		contract_mm_install_tokens(contract_mm_scope());
++}
++
+ static void contract_mm_record_refault_pages(struct contract_scope_id scope,
+ 					     unsigned int nr_pages)
+ {
+@@ -212,8 +219,6 @@
+ 	buf[count] = '\0';
+ 
+ 	enable = buf[0] != '0';
+-	contract_mm_gate_enabled = enable;
+-	if (enable)
+-		contract_mm_install_tokens(contract_mm_scope());
++	contract_mm_set_enabled(enable);
+ 	return count;
+ }
+diff -urN m16-base/kernel/bpf/contractbpf_sched.c m16-current/kernel/bpf/contractbpf_sched.c
+--- m16-base/kernel/bpf/contractbpf_sched.c	2026-05-22 14:15:00.000000000 +0000
++++ m16-current/kernel/bpf/contractbpf_sched.c	2026-05-22 14:15:00.000000000 +0000
+@@ -38,6 +38,13 @@
+ 	contract_register_token(&dispatch);
+ }
+ 
++void contract_sched_set_enabled(bool enabled)
++{
++	contract_sched_gate_enabled = enabled;
++	if (enabled)
++		contract_sched_install_tokens(contract_sched_scope());
++}
++
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+ 				 u64 *effective_slice)
+ {
+@@ -104,8 +111,6 @@
+ 	buf[count] = '\0';
+ 
+ 	enable = buf[0] != '0';
+-	contract_sched_gate_enabled = enable;
+-	if (enable)
+-		contract_sched_install_tokens(contract_sched_scope());
++	contract_sched_set_enabled(enable);
+ 	return count;
+ }

@@ -1,0 +1,477 @@
+diff -urN m18-base/include/linux/contractbpf.h m18-current/include/linux/contractbpf.h
+--- m18-base/include/linux/contractbpf.h	2026-05-22 15:00:00.000000000 +0000
++++ m18-current/include/linux/contractbpf.h	2026-05-22 15:00:00.000000000 +0000
+@@ -71,6 +71,20 @@
+ 	CONTRACT_MM_NO_OP,
+ };
+ 
++struct contract_mm_region_state {
++	u64 cgroup_id;
++	u64 memcg_id;
++	u64 region_id;
++	u32 numa_node;
++	u32 pages;
++	u32 hotness;
++	u32 recent_refaults;
++	u32 recent_major_faults;
++	u64 recent_fault_latency_us;
++	u32 flags;
++	u32 reserved;
++};
++
+ enum contract_ioctl_subsystem {
+ 	CONTRACTBPF_SUBSYS_SCHED = 1,
+ 	CONTRACTBPF_SUBSYS_MM = 2,
+@@ -108,6 +122,22 @@
+ 	u32 reserved2;
+ };
+ 
++struct contract_ioctl_mm_bpf_policy {
++	s32 prog_fd;
++	s32 state_map_fd;
++	u64 policy_id;
++	u32 registered;
++	u32 reserved;
++};
++
++struct contract_ioctl_mm_test_hook {
++	u32 pages;
++	u32 decision;
++	u32 allowed;
++	u32 reserved;
++	struct contract_ioctl_scope scope;
++};
++
+ struct contract_ioctl_snapshot {
+ 	struct contract_ioctl_scope scope;
+ 	u64 sched_queue_delay_us;
+@@ -134,6 +164,10 @@
+ 	_IOWR(CONTRACTBPF_IOC_MAGIC, 4, struct contract_ioctl_charge)
+ #define CONTRACTBPF_IOC_SET_GATE \
+ 	_IOW(CONTRACTBPF_IOC_MAGIC, 5, struct contract_ioctl_gate)
++#define CONTRACTBPF_IOC_SET_MM_BPF_POLICY \
++	_IOWR(CONTRACTBPF_IOC_MAGIC, 6, struct contract_ioctl_mm_bpf_policy)
++#define CONTRACTBPF_IOC_MM_TEST_HOOK \
++	_IOWR(CONTRACTBPF_IOC_MAGIC, 7, struct contract_ioctl_mm_test_hook)
+ 
+ #ifdef CONFIG_CONTRACTBPF
+ int contract_register_token(const struct contract_effect_token *token);
+@@ -152,6 +186,10 @@
+ void contract_mm_record_major_fault(u64 latency_us);
+ void contract_mm_debugfs_init(struct dentry *root);
+ void contract_mm_set_enabled(bool enabled);
++int contract_mm_register_bpf_policy(s32 prog_fd, s32 state_map_fd,
++				    u64 *policy_id);
++int contract_mm_test_hook(u32 pages, u32 *decision, u32 *allowed,
++			  struct contract_scope_id *scope);
+ struct contract_scope_id contract_service_scope(void);
+ void contract_cross_check(struct contract_scope_id scope);
+ u64 contract_effect_policy_id(enum contract_effect_type effect);
+@@ -251,6 +289,18 @@
+ {
+ }
+ 
++static inline int contract_mm_register_bpf_policy(s32 prog_fd, s32 state_map_fd,
++						  u64 *policy_id)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int contract_mm_test_hook(u32 pages, u32 *decision, u32 *allowed,
++					struct contract_scope_id *scope)
++{
++	return -EOPNOTSUPP;
++}
++
+ static inline struct contract_scope_id contract_service_scope(void)
+ {
+ 	return (struct contract_scope_id){};
+diff -urN m18-base/kernel/bpf/contractbpf_control.c m18-current/kernel/bpf/contractbpf_control.c
+--- m18-base/kernel/bpf/contractbpf_control.c	2026-05-22 15:00:00.000000000 +0000
++++ m18-current/kernel/bpf/contractbpf_control.c	2026-05-22 15:00:00.000000000 +0000
+@@ -142,6 +142,52 @@
+ 	}
+ }
+ 
++static long contract_ioctl_set_mm_bpf_policy(unsigned long arg)
++{
++	struct contract_ioctl_mm_bpf_policy policy;
++	int ret;
++
++	if (copy_from_user(&policy, (void __user *)arg, sizeof(policy)))
++		return -EFAULT;
++
++	ret = contract_mm_register_bpf_policy(policy.prog_fd,
++					      policy.state_map_fd,
++					      &policy.policy_id);
++	if (ret)
++		return ret;
++
++	policy.registered = policy.policy_id != 0;
++	if (copy_to_user((void __user *)arg, &policy, sizeof(policy)))
++		return -EFAULT;
++
++	return 0;
++}
++
++static long contract_ioctl_mm_test_hook(unsigned long arg)
++{
++	struct contract_ioctl_mm_test_hook test;
++	struct contract_scope_id scope;
++	u32 decision = CONTRACT_MM_NO_OP;
++	u32 allowed = 0;
++	int ret;
++
++	if (copy_from_user(&test, (void __user *)arg, sizeof(test)))
++		return -EFAULT;
++
++	ret = contract_mm_test_hook(test.pages, &decision, &allowed, &scope);
++	if (ret)
++		return ret;
++
++	test.decision = decision;
++	test.allowed = allowed;
++	contract_scope_to_ioctl(&test.scope, scope);
++
++	if (copy_to_user((void __user *)arg, &test, sizeof(test)))
++		return -EFAULT;
++
++	return 0;
++}
++
+ static long contractbpf_ioctl(struct file *file, unsigned int cmd,
+ 			      unsigned long arg)
+ {
+@@ -158,6 +202,10 @@
+ 		return contract_ioctl_charge_effect(arg);
+ 	case CONTRACTBPF_IOC_SET_GATE:
+ 		return contract_ioctl_set_gate(arg);
++	case CONTRACTBPF_IOC_SET_MM_BPF_POLICY:
++		return contract_ioctl_set_mm_bpf_policy(arg);
++	case CONTRACTBPF_IOC_MM_TEST_HOOK:
++		return contract_ioctl_mm_test_hook(arg);
+ 	default:
+ 		return -ENOTTY;
+ 	}
+diff -urN m18-base/kernel/bpf/contractbpf_mm.c m18-current/kernel/bpf/contractbpf_mm.c
+--- m18-base/kernel/bpf/contractbpf_mm.c	2026-05-22 15:00:00.000000000 +0000
++++ m18-current/kernel/bpf/contractbpf_mm.c	2026-05-22 15:00:00.000000000 +0000
+@@ -8,12 +8,16 @@
+  * folio state to BPF.
+  */
+ #include <linux/atomic.h>
++#include <linux/bpf.h>
+ #include <linux/contractbpf.h>
+ #include <linux/debugfs.h>
++#include <linux/err.h>
++#include <linux/filter.h>
+ #include <linux/kernel.h>
+ #include <linux/mm.h>
+ #include <linux/module.h>
+ #include <linux/seq_file.h>
++#include <linux/spinlock.h>
+ #include <linux/uaccess.h>
+ 
+ #define CONTRACT_MM_SIM_FAULT_LATENCY_US 250
+@@ -26,6 +30,14 @@
+ static atomic64_t contract_mm_revoked_demotes;
+ static atomic64_t contract_mm_no_op_decisions;
+ static atomic64_t contract_mm_simulation_runs;
++static atomic64_t contract_mm_bpf_runs;
++static atomic64_t contract_mm_bpf_failures;
++static atomic64_t contract_mm_bpf_invalid_decisions;
++static DEFINE_SPINLOCK(contract_mm_bpf_lock);
++static struct bpf_prog *contract_mm_bpf_prog;
++static struct bpf_map *contract_mm_bpf_state_map;
++static u64 contract_mm_bpf_policy_id;
++static u32 contract_mm_bpf_last_decision = CONTRACT_MM_NO_OP;
+ 
+ static struct contract_scope_id contract_mm_scope(void)
+ {
+@@ -36,13 +48,28 @@
+ 	atomic64_set(&contract_mm_revoked_demotes, 0);
+ 	atomic64_set(&contract_mm_no_op_decisions, 0);
+ 	atomic64_set(&contract_mm_simulation_runs, 0);
++	atomic64_set(&contract_mm_bpf_runs, 0);
++	atomic64_set(&contract_mm_bpf_failures, 0);
++	atomic64_set(&contract_mm_bpf_invalid_decisions, 0);
++	WRITE_ONCE(contract_mm_bpf_last_decision, CONTRACT_MM_NO_OP);
++}
++
++static u64 contract_mm_policy_id_for_scope(enum contract_effect_type effect,
++					   struct contract_scope_id scope)
++{
++	u64 bpf_policy_id = READ_ONCE(contract_mm_bpf_policy_id);
++
++	if (bpf_policy_id)
++		return bpf_policy_id;
++	return contract_effect_policy_id_for_scope(effect, scope);
+ }
+ 
+ static void contract_mm_install_tokens(struct contract_scope_id scope)
+ {
+-	u64 demote_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope);
+-	u64 reclaim_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_RECLAIM_HINT,
+-								 scope);
++	u64 demote_policy = contract_mm_policy_id_for_scope(
++		CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope);
++	u64 reclaim_policy = contract_mm_policy_id_for_scope(
++		CONTRACT_EFFECT_MM_RECLAIM_HINT, scope);
+ 	struct contract_effect_token demote = {
+ 		.prog_id = demote_policy,
+ 		.scope = scope,
+@@ -75,8 +103,10 @@
+ 		.budget_primary = contract_mm_reclaim_hint_budget,
+ 	};
+ 
+-	contract_register_token(&demote);
+-	contract_register_token(&reclaim_hint);
++	if (demote_policy && !contract_register_token(&demote))
++		contract_note_installed_token(&demote);
++	if (reclaim_policy && !contract_register_token(&reclaim_hint))
++		contract_note_installed_token(&reclaim_hint);
+ }
+ 
+ void contract_mm_set_enabled(bool enabled)
+@@ -84,6 +116,137 @@
+ 	contract_mm_gate_enabled = enabled;
+ }
+ 
++static bool contract_mm_bpf_map_compatible(struct bpf_map *map)
++{
++	return map && map->map_type == BPF_MAP_TYPE_ARRAY &&
++	       map->key_size == sizeof(u32) &&
++	       map->value_size >= sizeof(struct contract_mm_region_state) &&
++	       map->max_entries >= 1 && map->ops && map->ops->map_update_elem;
++}
++
++int contract_mm_register_bpf_policy(s32 prog_fd, s32 state_map_fd,
++				    u64 *policy_id)
++{
++	struct bpf_prog *new_prog = NULL, *old_prog;
++	struct bpf_map *new_map = NULL, *old_map;
++	u64 new_policy_id = 0;
++	unsigned long flags;
++
++	if (prog_fd < 0 || state_map_fd < 0)
++		goto swap_policy;
++
++	new_prog = bpf_prog_get_type(prog_fd, BPF_PROG_TYPE_SYSCALL);
++	if (IS_ERR(new_prog))
++		return PTR_ERR(new_prog);
++
++	new_map = bpf_map_get(state_map_fd);
++	if (IS_ERR(new_map)) {
++		bpf_prog_put(new_prog);
++		return PTR_ERR(new_map);
++	}
++
++	if (!contract_mm_bpf_map_compatible(new_map)) {
++		bpf_map_put(new_map);
++		bpf_prog_put(new_prog);
++		return -EINVAL;
++	}
++
++	new_policy_id = new_prog->aux ? new_prog->aux->id : 0;
++	if (!new_policy_id) {
++		bpf_map_put(new_map);
++		bpf_prog_put(new_prog);
++		return -EINVAL;
++	}
++
++swap_policy:
++	spin_lock_irqsave(&contract_mm_bpf_lock, flags);
++	old_prog = contract_mm_bpf_prog;
++	old_map = contract_mm_bpf_state_map;
++	contract_mm_bpf_prog = new_prog;
++	contract_mm_bpf_state_map = new_map;
++	WRITE_ONCE(contract_mm_bpf_policy_id, new_policy_id);
++	WRITE_ONCE(contract_mm_bpf_last_decision, CONTRACT_MM_NO_OP);
++	spin_unlock_irqrestore(&contract_mm_bpf_lock, flags);
++
++	if (old_map)
++		bpf_map_put(old_map);
++	if (old_prog)
++		bpf_prog_put(old_prog);
++
++	if (new_policy_id)
++		contract_mm_install_tokens(contract_current_memcg_scope());
++	if (policy_id)
++		*policy_id = new_policy_id;
++	return 0;
++}
++
++static struct contract_mm_region_state
++contract_mm_region_state_from_scope(struct contract_scope_id scope,
++				    struct folio *folio,
++				    unsigned int nr_pages)
++{
++	struct contract_ledger *ledger = contract_lookup_ledger(scope);
++	u64 refaults = 0, major_faults = 0, latency_us = 0;
++
++	if (ledger) {
++		refaults = atomic64_read(&ledger->refault_events);
++		major_faults = atomic64_read(&ledger->major_fault_events);
++		latency_us = atomic64_read(&ledger->fault_latency_us);
++	}
++
++	return (struct contract_mm_region_state){
++		.cgroup_id = scope.primary_id,
++		.memcg_id = scope.primary_id,
++		.region_id = folio ? folio_pfn(folio) : 0,
++		.numa_node = folio ? folio_nid(folio) : 0,
++		.pages = nr_pages ?: 1,
++		.hotness = refaults || major_faults ? 80 : 0,
++		.recent_refaults = min_t(u64, refaults, U32_MAX),
++		.recent_major_faults = min_t(u64, major_faults, U32_MAX),
++		.recent_fault_latency_us = latency_us,
++	};
++}
++
++static enum contract_mm_decision
++contract_mm_bpf_decide(struct contract_scope_id scope, struct folio *folio,
++		       unsigned int nr_pages, enum contract_mm_decision fallback)
++{
++	struct contract_mm_region_state state;
++	struct bpf_prog *prog;
++	struct bpf_map *map;
++	unsigned long flags;
++	u32 key = 0, verdict;
++	long ret;
++
++	state = contract_mm_region_state_from_scope(scope, folio, nr_pages);
++
++	spin_lock_irqsave(&contract_mm_bpf_lock, flags);
++	prog = contract_mm_bpf_prog;
++	map = contract_mm_bpf_state_map;
++	if (!prog || !map) {
++		spin_unlock_irqrestore(&contract_mm_bpf_lock, flags);
++		return fallback;
++	}
++
++	ret = map->ops->map_update_elem(map, &key, &state, BPF_ANY);
++	if (ret) {
++		atomic64_inc(&contract_mm_bpf_failures);
++		spin_unlock_irqrestore(&contract_mm_bpf_lock, flags);
++		return fallback;
++	}
++
++	verdict = bpf_prog_run(prog, NULL);
++	atomic64_inc(&contract_mm_bpf_runs);
++	WRITE_ONCE(contract_mm_bpf_last_decision, verdict);
++	spin_unlock_irqrestore(&contract_mm_bpf_lock, flags);
++
++	if (verdict > CONTRACT_MM_NO_OP) {
++		atomic64_inc(&contract_mm_bpf_invalid_decisions);
++		return fallback;
++	}
++	return verdict;
++}
++
+ static void contract_mm_record_refault_pages(struct contract_scope_id scope,
+ 					     unsigned int nr_pages)
+ {
+@@ -109,6 +252,7 @@
+ 	enum contract_effect_type effect;
+ 	struct contract_ledger *ledger;
+ 	u32 degrade_state = CONTRACT_DEGRADE_REVOKE;
++	u64 policy_id;
+ 	int ret;
+ 
+ 	if (!contract_mm_gate_enabled)
+@@ -121,17 +265,16 @@
+ 	else
+ 		return decision;
+ 
+-	if (!contract_effect_policy_id_for_scope(effect, scope))
++	policy_id = contract_mm_policy_id_for_scope(effect, scope);
++	if (!policy_id)
+ 		return decision;
+ 
+ 	nr_pages = nr_pages ?: 1;
+ 	contract_mm_install_tokens(scope);
+ 
+ 	switch (decision) {
+ 	case CONTRACT_MM_DEMOTE:
+-		ret = contract_effect_gate(
+-					   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope),
+-					   CONTRACT_EFFECT_MM_DEMOTE_PAGE,
++		ret = contract_effect_gate(policy_id, CONTRACT_EFFECT_MM_DEMOTE_PAGE,
+ 					   scope, nr_pages, 0);
+ 		if (ret == CONTRACT_ALLOW)
+ 			return CONTRACT_MM_DEMOTE;
+@@ -153,10 +295,8 @@
+ 
+ 		return CONTRACT_MM_NO_OP;
+ 	case CONTRACT_MM_RECLAIM_HINT:
+-		ret = contract_effect_gate(
+-					   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_RECLAIM_HINT, scope),
+-					   CONTRACT_EFFECT_MM_RECLAIM_HINT,
+-					   scope, 1, 0);
++		ret = contract_effect_gate(policy_id, CONTRACT_EFFECT_MM_RECLAIM_HINT,
++					   scope, 1, 0);
+ 		if (ret == CONTRACT_ALLOW)
+ 			return CONTRACT_MM_RECLAIM_HINT;
+ 		return CONTRACT_MM_NO_OP;
+@@ -167,18 +307,45 @@
+ 	}
+ }
+ 
+-bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages)
++static enum contract_mm_decision
++contract_mm_demote_decision(struct folio *folio, unsigned int nr_pages,
++			    struct contract_scope_id *scope_out)
+ {
+-	enum contract_mm_decision decision;
+ 	struct contract_scope_id scope = contract_folio_scope(folio);
++	enum contract_mm_decision decision = CONTRACT_MM_DEMOTE;
+ 
+-	decision = contract_mm_validate_decision(scope, CONTRACT_MM_DEMOTE, nr_pages);
++	if (scope_out)
++		*scope_out = scope;
++	if (contract_mm_gate_enabled)
++		decision = contract_mm_bpf_decide(scope, folio, nr_pages,
++						  CONTRACT_MM_DEMOTE);
++	return contract_mm_validate_decision(scope, decision, nr_pages);
++}
++
++bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages)
++{
++	enum contract_mm_decision decision;
++
++	decision = contract_mm_demote_decision(folio, nr_pages, NULL);
+ 	if (decision == CONTRACT_MM_DEMOTE)
+ 		return true;
+ 
+ 	atomic64_add(nr_pages ?: 1, &contract_mm_no_op_decisions);
+ 	return false;
+ }
++
++int contract_mm_test_hook(u32 pages, u32 *decision, u32 *allowed,
++			  struct contract_scope_id *scope)
++{
++	enum contract_mm_decision verdict;
++
++	verdict = contract_mm_demote_decision(NULL, pages ?: 1, scope);
++	if (decision)
++		*decision = verdict;
++	if (allowed)
++		*allowed = verdict == CONTRACT_MM_DEMOTE;
++	return 0;
++}
+ 
+ void contract_mm_record_refault(struct folio *folio)
+ {
+@@ -294,5 +457,12 @@
+ 	seq_printf(seq, "simulation_runs=%lld\n",
+ 		   atomic64_read(&contract_mm_simulation_runs));
++	seq_printf(seq, "bpf_policy_id=%llu\n", READ_ONCE(contract_mm_bpf_policy_id));
++	seq_printf(seq, "bpf_runs=%lld\n", atomic64_read(&contract_mm_bpf_runs));
++	seq_printf(seq, "bpf_failures=%lld\n",
++		   atomic64_read(&contract_mm_bpf_failures));
++	seq_printf(seq, "bpf_invalid_decisions=%lld\n",
++		   atomic64_read(&contract_mm_bpf_invalid_decisions));
++	seq_printf(seq, "bpf_last_decision=%u\n", READ_ONCE(contract_mm_bpf_last_decision));
+ 
+ 	if (!ledger)
+ 		return 0;

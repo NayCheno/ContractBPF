@@ -1,0 +1,8 @@
+diff -urN m27-base/kernel/bpf/contractbpf_ledger.c m27-current/kernel/bpf/contractbpf_ledger.c
+--- m27-base/kernel/bpf/contractbpf_ledger.c	2026-05-22 16:40:00.000000000 +0000
++++ m27-current/kernel/bpf/contractbpf_ledger.c	2026-05-22 16:40:00.000000000 +0000
+@@ -234,3 +234,4 @@
+ {
+ 	debugfs_create_file("ledger_stress", 0444, root, NULL,
+ 			    &contract_ledger_stress_fops);
++}

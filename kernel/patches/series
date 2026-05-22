@@ -2,6 +2,28 @@
 0002-contractbpf-sched-ext-effect-gate.patch
 0004-contractbpf-mm-decision-hook.patch
 0005-contractbpf-cross-subsystem-ledger.patch
+0007-contractbpf-device-control.patch
+0008-contractbpf-active-policy-scope-identity.patch
+0009-contractbpf-identity-fixups.patch
+0010-contractbpf-mm-identity-snapshot.patch
+0011-contractbpf-ioctl-charge-effect.patch
+0012-contractbpf-charge-ioctl-define.patch
+0013-contractbpf-runtime-scope-attribution.patch
+0014-contractbpf-runtime-scope-mm-callsite-fixups.patch
+0015-contractbpf-avoid-fallback-policy-for-unknown-scope.patch
+0016-contractbpf-ioctl-gate-control.patch
+0017-contractbpf-gate-enable-without-token-rewrite.patch
+0018-contractbpf-mm-bpf-live-policy.patch
+0019-contractbpf-mm-bpf-state-abi-fix.patch
+0020-contractbpf-preserve-manifest-sched-budgets.patch
+0021-contractbpf-raise-default-mm-natural-budget.patch
+0022-contractbpf-record-sched-ext-run-delay.patch
+0023-contractbpf-enforce-revoked-effects.patch
+0024-contractbpf-ledger-hotpath-lockless-existing.patch
+0025-contractbpf-ledger-stress-selftest.patch
+0026-contractbpf-ledger-stress-impl-fixup.patch
+0027-contractbpf-ledger-stress-closing-brace.patch
+0028-contractbpf-hotpath-timing-selftest.patch
 
 # Remaining planned patches:
 # 0003-contractbpf-bounded-degrade-controller.patch

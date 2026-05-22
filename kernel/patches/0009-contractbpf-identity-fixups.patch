@@ -1,0 +1,47 @@
+diff -urN m9-base/kernel/bpf/contractbpf_identity.c m9-current/kernel/bpf/contractbpf_identity.c
+--- m9-base/kernel/bpf/contractbpf_identity.c	2026-05-22 12:40:00.000000000 +0000
++++ m9-current/kernel/bpf/contractbpf_identity.c	2026-05-22 12:40:00.000000000 +0000
+@@ -132,3 +132,12 @@
+ {
+ 	struct contract_scope_id scope;
+ 	unsigned long flags;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	scope = contract_sched_identity.configured ? contract_sched_identity.scope :
++						    contract_mm_identity.scope;
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++
++	return scope;
++}
++
+diff -urN m9-base/kernel/bpf/contractbpf_mm.c m9-current/kernel/bpf/contractbpf_mm.c
+--- m9-base/kernel/bpf/contractbpf_mm.c	2026-05-22 12:40:00.000000000 +0000
++++ m9-current/kernel/bpf/contractbpf_mm.c	2026-05-22 12:40:00.000000000 +0000
+@@ -51,6 +51,6 @@
+ 	};
+ 	struct contract_effect_token reclaim_hint = {
+-		.prog_id = CONTRACT_MM_PROG_ID,
++		.prog_id = reclaim_policy,
+ 		.scope = scope,
+ 		.effect = CONTRACT_EFFECT_MM_RECLAIM_HINT,
+ 		.budget_primary = contract_mm_reclaim_hint_budget,
+@@ -93,7 +93,8 @@
+ 
+ 	switch (decision) {
+ 	case CONTRACT_MM_DEMOTE:
+-		ret = contract_effect_gate(CONTRACT_MM_PROG_ID,
++		ret = contract_effect_gate(
++					   contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE),
+ 					   CONTRACT_EFFECT_MM_DEMOTE_PAGE,
+ 					   scope, nr_pages, 0);
+ 		if (ret == CONTRACT_ALLOW)
+@@ -111,7 +112,8 @@
+ 
+ 		return CONTRACT_MM_NO_OP;
+ 	case CONTRACT_MM_RECLAIM_HINT:
+-		ret = contract_effect_gate(CONTRACT_MM_PROG_ID,
++		ret = contract_effect_gate(
++					   contract_effect_policy_id(CONTRACT_EFFECT_MM_RECLAIM_HINT),
+ 					   CONTRACT_EFFECT_MM_RECLAIM_HINT,
+ 					   scope, 1, 0);
+ 		if (ret == CONTRACT_ALLOW)

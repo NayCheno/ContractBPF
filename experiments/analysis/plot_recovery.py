@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import re
 from pathlib import Path
 
 def parse_args():
@@ -61,14 +62,19 @@ def text(x, y, value, size=12, anchor="middle"):
     )
 
 
+def to_int(value):
+    match = re.match(r"\s*(-?\d+)", str(value))
+    return int(match.group(1)) if match else 0
+
+
 def write_svg(rows, path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     width = 720
     height = 320
     chart_bottom = 250
-    max_delay = max(int(row["sched_queue_delay_us"]) for row in rows) or 1
-    max_state = max(int(row["demote_degrade_state"]) for row in rows) or 1
+    max_delay = max(to_int(row["sched_queue_delay_us"]) for row in rows) or 1
+    max_state = max(to_int(row["demote_degrade_state"]) for row in rows) or 1
     colors = {"unguarded": "#b91c1c", "guarded": "#047857"}
 
     parts = [
@@ -85,8 +91,8 @@ def write_svg(rows, path):
     bar_width = 84
     for idx, row in enumerate(rows):
         mode = row["mode"]
-        delay = int(row["sched_queue_delay_us"])
-        degrade = int(row["demote_degrade_state"])
+        delay = to_int(row["sched_queue_delay_us"])
+        degrade = to_int(row["demote_degrade_state"])
         x = 130 + idx * slot
         bar_height = int((delay / max_delay) * 150)
         parts.append(bar(x, chart_bottom - bar_height, bar_width, bar_height, colors.get(mode, "#334155")))

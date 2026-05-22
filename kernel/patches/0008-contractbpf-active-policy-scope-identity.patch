@@ -1,0 +1,409 @@
+diff -urN m8-base/include/linux/contractbpf.h m8-current/include/linux/contractbpf.h
+--- m8-base/include/linux/contractbpf.h	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/include/linux/contractbpf.h	2026-05-22 12:20:00.000000000 +0000
+@@ -119,6 +119,10 @@
+ void contract_mm_debugfs_init(struct dentry *root);
+ struct contract_scope_id contract_service_scope(void);
+ void contract_cross_check(struct contract_scope_id scope);
++u64 contract_effect_policy_id(enum contract_effect_type effect);
++struct contract_scope_id contract_effect_scope(enum contract_effect_type effect);
++void contract_note_installed_token(const struct contract_effect_token *token);
++void contract_identity_reset_for_tests(void);
+ void contract_cross_debugfs_init(struct dentry *root);
+ struct contract_effect_token *contract_lookup_token(u64 prog_id,
+ 						    enum contract_effect_type effect,
+@@ -181,6 +185,26 @@
+ static inline void contract_cross_check(struct contract_scope_id scope)
+ {
+ }
++
++static inline u64 contract_effect_policy_id(enum contract_effect_type effect)
++{
++	return 0;
++}
++
++static inline struct contract_scope_id
++contract_effect_scope(enum contract_effect_type effect)
++{
++	return (struct contract_scope_id){};
++}
++
++static inline void
++contract_note_installed_token(const struct contract_effect_token *token)
++{
++}
++
++static inline void contract_identity_reset_for_tests(void)
++{
++}
+ 
+ static inline void contract_cross_debugfs_init(struct dentry *root)
+ {
+diff -urN m8-base/kernel/bpf/Makefile m8-current/kernel/bpf/Makefile
+--- m8-base/kernel/bpf/Makefile	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/kernel/bpf/Makefile	2026-05-22 12:20:00.000000000 +0000
+@@ -7,5 +7,5 @@
+ CFLAGS_core.o += -Wno-override-init $(cflags-nogcse-yy)
+ 
+ obj-$(CONFIG_BPF_SYSCALL) += syscall.o verifier.o inode.o helpers.o tnum.o log.o token.o
+-obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o contractbpf_mm.o contractbpf_cross.o contractbpf_control.o
++obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_identity.o contractbpf_sched.o contractbpf_mm.o contractbpf_cross.o contractbpf_control.o
+ obj-$(CONFIG_BPF_SYSCALL) += bpf_iter.o map_iter.o task_iter.o prog_iter.o link_iter.o
+diff -urN m8-base/kernel/bpf/contractbpf_control.c m8-current/kernel/bpf/contractbpf_control.c
+--- m8-base/kernel/bpf/contractbpf_control.c	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/kernel/bpf/contractbpf_control.c	2026-05-22 12:20:00.000000000 +0000
+@@ -34,6 +34,7 @@
+ {
+ 	struct contract_ioctl_token user_token;
+ 	struct contract_effect_token token;
++	int ret;
+ 
+ 	if (copy_from_user(&user_token, (void __user *)arg, sizeof(user_token)))
+ 		return -EFAULT;
+@@ -54,7 +55,10 @@
+ 		.degrade_state = user_token.degrade_state,
+ 	};
+ 
+-	return contract_register_token(&token);
++	ret = contract_register_token(&token);
++	if (!ret)
++		contract_note_installed_token(&token);
++	return ret;
+ }
+ 
+ static void contract_snapshot_from_ledger(struct contract_ioctl_snapshot *snap,
+@@ -105,6 +109,7 @@
+ 		return contract_ioctl_get_ledger(arg);
+ 	case CONTRACTBPF_IOC_RESET_TEST:
+ 		contract_reset_for_tests();
++		contract_identity_reset_for_tests();
+ 		return 0;
+ 	default:
+ 		return -ENOTTY;
+diff -urN m8-base/kernel/bpf/contractbpf_cross.c m8-current/kernel/bpf/contractbpf_cross.c
+--- m8-base/kernel/bpf/contractbpf_cross.c	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/kernel/bpf/contractbpf_cross.c	2026-05-22 12:20:00.000000000 +0000
+@@ -7,28 +7,17 @@
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+ 
+-#define CONTRACT_SERVICE_SCOPE_TYPE 1
+-#define CONTRACT_SERVICE_SCOPE_PRIMARY 1
+ #define CONTRACT_CROSS_REFAULT_THRESHOLD 2
+ #define CONTRACT_CROSS_QUEUE_DELAY_US 5000
+ #define CONTRACT_CROSS_DEMOTE_THRESHOLD 0
+-#define CONTRACT_CROSS_PROG_ID 0
+ 
+ static DEFINE_SPINLOCK(contract_cross_audit_lock);
+ static char contract_cross_last_audit[192] =
+ 	"reason=none revoke=none preserve=none";
+ static bool contract_cross_rule_enabled = true;
+ static atomic64_t contract_cross_unguarded_runs;
+ static atomic64_t contract_cross_guarded_runs;
+ 
+-struct contract_scope_id contract_service_scope(void)
+-{
+-	return (struct contract_scope_id){
+-		.type = CONTRACT_SERVICE_SCOPE_TYPE,
+-		.primary_id = CONTRACT_SERVICE_SCOPE_PRIMARY,
+-	};
+-}
+-
+ static void contract_cross_set_audit(struct contract_scope_id scope,
+ 				     const char *reason)
+ {
+@@ -65,7 +53,8 @@
+ 	contract_cross_set_audit(scope, "refault+queue_delay+demotion");
+ 	while (ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE] <
+ 	       CONTRACT_DEGRADE_REVOKE)
+-		contract_trigger_degrade(CONTRACT_CROSS_PROG_ID,
++		contract_trigger_degrade(
++					 contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE),
+ 					 CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope,
+ 					 "cross-subsystem invariant");
+ }
+diff -urN m8-base/kernel/bpf/contractbpf_identity.c m8-current/kernel/bpf/contractbpf_identity.c
+--- m8-base/kernel/bpf/contractbpf_identity.c	1970-01-01 00:00:00.000000000 +0000
++++ m8-current/kernel/bpf/contractbpf_identity.c	2026-05-22 12:20:00.000000000 +0000
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Active ContractBPF identity state.
++ *
++ * The original prototype charged all scheduler and MM effects to prog_id=0 and
++ * a single hard-coded service scope. The ioctl control plane installs concrete
++ * contract policy IDs and cgroup/memcg-derived service scopes; hot paths read
++ * this active identity so ledgers are keyed by the manifest-installed policy
++ * and resolved scope. The nonzero defaults preserve existing debugfs selftests
++ * before userspace installs manifests.
++ */
++#include <linux/contractbpf.h>
++#include <linux/spinlock.h>
++
++#define CONTRACT_DEFAULT_SCOPE_TYPE 1
++#define CONTRACT_DEFAULT_SCOPE_PRIMARY 1
++#define CONTRACT_DEFAULT_SCHED_POLICY_ID 0x4353505343484544ULL /* CSPSCHED */
++#define CONTRACT_DEFAULT_MM_POLICY_ID 0x4353504d4d504f4cULL    /* CSPMMPOL */
++
++struct contract_active_identity {
++	u64 policy_id;
++	struct contract_scope_id scope;
++	bool configured;
++};
++
++static DEFINE_SPINLOCK(contract_identity_lock);
++static struct contract_active_identity contract_sched_identity = {
++	.policy_id = CONTRACT_DEFAULT_SCHED_POLICY_ID,
++	.scope = {
++		.type = CONTRACT_DEFAULT_SCOPE_TYPE,
++		.primary_id = CONTRACT_DEFAULT_SCOPE_PRIMARY,
++	},
++};
++static struct contract_active_identity contract_mm_identity = {
++	.policy_id = CONTRACT_DEFAULT_MM_POLICY_ID,
++	.scope = {
++		.type = CONTRACT_DEFAULT_SCOPE_TYPE,
++		.primary_id = CONTRACT_DEFAULT_SCOPE_PRIMARY,
++	},
++};
++
++static bool contract_effect_is_sched(enum contract_effect_type effect)
++{
++	return effect == CONTRACT_EFFECT_SCHED_BOOST ||
++	       effect == CONTRACT_EFFECT_SCHED_DISPATCH ||
++	       effect == CONTRACT_EFFECT_SCHED_PIN_CPU;
++}
++
++static bool contract_effect_is_mm(enum contract_effect_type effect)
++{
++	return effect == CONTRACT_EFFECT_MM_DEMOTE_PAGE ||
++	       effect == CONTRACT_EFFECT_MM_RECLAIM_HINT ||
++	       effect == CONTRACT_EFFECT_MM_CLASSIFY_REGION;
++}
++
++static struct contract_scope_id contract_default_scope(void)
++{
++	return (struct contract_scope_id){
++		.type = CONTRACT_DEFAULT_SCOPE_TYPE,
++		.primary_id = CONTRACT_DEFAULT_SCOPE_PRIMARY,
++	};
++}
++
++void contract_identity_reset_for_tests(void)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	contract_sched_identity.policy_id = CONTRACT_DEFAULT_SCHED_POLICY_ID;
++	contract_sched_identity.scope = contract_default_scope();
++	contract_sched_identity.configured = false;
++	contract_mm_identity.policy_id = CONTRACT_DEFAULT_MM_POLICY_ID;
++	contract_mm_identity.scope = contract_default_scope();
++	contract_mm_identity.configured = false;
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++}
++
++void contract_note_installed_token(const struct contract_effect_token *token)
++{
++	unsigned long flags;
++
++	if (!token || !token->prog_id || token->effect >= CONTRACT_EFFECT_MAX)
++		return;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	if (contract_effect_is_sched(token->effect)) {
++		contract_sched_identity.policy_id = token->prog_id;
++		contract_sched_identity.scope = token->scope;
++		contract_sched_identity.configured = true;
++	} else if (contract_effect_is_mm(token->effect)) {
++		contract_mm_identity.policy_id = token->prog_id;
++		contract_mm_identity.scope = token->scope;
++		contract_mm_identity.configured = true;
++	}
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++}
++
++u64 contract_effect_policy_id(enum contract_effect_type effect)
++{
++	u64 policy_id;
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	if (contract_effect_is_sched(effect))
++		policy_id = contract_sched_identity.policy_id;
++	else if (contract_effect_is_mm(effect))
++		policy_id = contract_mm_identity.policy_id;
++	else
++		policy_id = CONTRACT_DEFAULT_SCHED_POLICY_ID;
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++
++	return policy_id;
++}
++
++struct contract_scope_id contract_effect_scope(enum contract_effect_type effect)
++{
++	struct contract_scope_id scope;
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	if (contract_effect_is_sched(effect))
++		scope = contract_sched_identity.scope;
++	else if (contract_effect_is_mm(effect))
++		scope = contract_mm_identity.scope;
++	else
++		scope = contract_default_scope();
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++
++	return scope;
++}
++
++struct contract_scope_id contract_service_scope(void)
++{
++	struct contract_scope_id scope;
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_identity_lock, flags);
++	scope = contract_sched_identity.configured ? contract_sched_identity.scope :
++						    contract_mm_identity.scope;
++	spin_unlock_irqrestore(&contract_identity_lock, flags);
++
++	return scope;
++}
+diff -urN m8-base/kernel/bpf/contractbpf_mm.c m8-current/kernel/bpf/contractbpf_mm.c
+--- m8-base/kernel/bpf/contractbpf_mm.c	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/kernel/bpf/contractbpf_mm.c	2026-05-22 12:20:00.000000000 +0000
+@@ -14,7 +14,6 @@
+ #include <linux/seq_file.h>
+ #include <linux/uaccess.h>
+ 
+-#define CONTRACT_MM_PROG_ID 0
+ #define CONTRACT_MM_SIM_FAULT_LATENCY_US 250
+ 
+ static bool contract_mm_gate_enabled;
+@@ -29,7 +28,7 @@
+ 
+ static struct contract_scope_id contract_mm_scope(void)
+ {
+-	return contract_service_scope();
++	return contract_effect_scope(CONTRACT_EFFECT_MM_DEMOTE_PAGE);
+ }
+ 
+ static void contract_mm_reset_counters(void)
+@@ -43,6 +42,8 @@
+ static void contract_mm_install_tokens(void)
+ {
+ 	struct contract_scope_id scope = contract_mm_scope();
++	u64 demote_policy = contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE);
++	u64 reclaim_policy = contract_effect_policy_id(CONTRACT_EFFECT_MM_RECLAIM_HINT);
+ 	struct contract_effect_token demote = {
+-		.prog_id = CONTRACT_MM_PROG_ID,
++		.prog_id = demote_policy,
+ 		.scope = scope,
+ 		.effect = CONTRACT_EFFECT_MM_DEMOTE_PAGE,
+ 		.budget_primary = contract_mm_demote_budget,
+@@ -50,7 +51,7 @@
+ 	};
+ 	struct contract_effect_token reclaim_hint = {
+-		.prog_id = CONTRACT_MM_PROG_ID,
++		.prog_id = reclaim_policy,
+ 		.scope = scope,
+ 		.effect = CONTRACT_EFFECT_MM_RECLAIM_HINT,
+ 		.budget_primary = contract_mm_reclaim_hint_budget,
+@@ -86,7 +87,8 @@
+ 
+ 	switch (decision) {
+ 	case CONTRACT_MM_DEMOTE:
+-		ret = contract_effect_gate(CONTRACT_MM_PROG_ID,
++		ret = contract_effect_gate(
++					   contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE),
+ 					   CONTRACT_EFFECT_MM_DEMOTE_PAGE,
+ 					   scope, nr_pages, 0);
+ 		if (ret == CONTRACT_ALLOW)
+@@ -106,7 +108,8 @@
+ 
+ 		return CONTRACT_MM_NO_OP;
+ 	case CONTRACT_MM_RECLAIM_HINT:
+-		ret = contract_effect_gate(CONTRACT_MM_PROG_ID,
++		ret = contract_effect_gate(
++					   contract_effect_policy_id(CONTRACT_EFFECT_MM_RECLAIM_HINT),
+ 					   CONTRACT_EFFECT_MM_RECLAIM_HINT,
+ 					   scope, 1, 0);
+ 		if (ret == CONTRACT_ALLOW)
+@@ -246,6 +249,9 @@
+ 
+ 	seq_puts(seq, "prototype_path=1\n");
+ 	seq_printf(seq, "enabled=%u\n", contract_mm_gate_enabled);
++	seq_printf(seq, "policy_id=%llu\n",
++		   contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE));
++	seq_printf(seq, "scope=%u:%llu:%llu\n", scope.type, scope.primary_id, scope.secondary_id);
+ 	seq_printf(seq, "demote_budget=%llu\n", contract_mm_demote_budget);
+ 	seq_printf(seq, "throttled_demotes=%lld\n",
+ 		   atomic64_read(&contract_mm_throttled_demotes));
+diff -urN m8-base/kernel/bpf/contractbpf_sched.c m8-current/kernel/bpf/contractbpf_sched.c
+--- m8-base/kernel/bpf/contractbpf_sched.c	2026-05-22 12:20:00.000000000 +0000
++++ m8-current/kernel/bpf/contractbpf_sched.c	2026-05-22 12:20:00.000000000 +0000
+@@ -9,8 +9,6 @@
+ #include <linux/seq_file.h>
+ #include <linux/uaccess.h>
+ 
+-#define CONTRACT_SCHED_PROG_ID 0
+-
+ static bool contract_sched_gate_enabled;
+ static u64 contract_sched_boost_budget = 4;
+ static atomic64_t contract_sched_throttled_boosts;
+@@ -18,13 +16,15 @@
+ static struct contract_scope_id contract_sched_scope(void)
+ {
+-	return contract_service_scope();
++	return contract_effect_scope(CONTRACT_EFFECT_SCHED_DISPATCH);
+ }
+ 
+ static void contract_sched_install_tokens(void)
+ {
+ 	struct contract_scope_id scope = contract_sched_scope();
++	u64 boost_policy = contract_effect_policy_id(CONTRACT_EFFECT_SCHED_BOOST);
++	u64 dispatch_policy = contract_effect_policy_id(CONTRACT_EFFECT_SCHED_DISPATCH);
+ 	struct contract_effect_token boost = {
+-		.prog_id = CONTRACT_SCHED_PROG_ID,
++		.prog_id = boost_policy,
+ 		.scope = scope,
+ 		.effect = CONTRACT_EFFECT_SCHED_BOOST,
+ 		.budget_primary = contract_sched_boost_budget,
+@@ -32,6 +32,6 @@
+ 	};
+ 	struct contract_effect_token dispatch = {
+-		.prog_id = CONTRACT_SCHED_PROG_ID,
++		.prog_id = dispatch_policy,
+ 		.scope = scope,
+ 		.effect = CONTRACT_EFFECT_SCHED_DISPATCH,
+ 	};
+@@ -56,7 +56,8 @@
+ 
+ 	contract_sched_install_tokens();
+ 
+-	ret = contract_effect_gate(CONTRACT_SCHED_PROG_ID,
++	ret = contract_effect_gate(
++				   contract_effect_policy_id(CONTRACT_EFFECT_SCHED_DISPATCH),
+ 				   CONTRACT_EFFECT_SCHED_DISPATCH, scope, 1, 0);
+ 	if (ret == CONTRACT_DENY)
+ 		contract_ledger_charge(scope,
+@@ -69,7 +70,8 @@
+ 	if (p->scx.runnable_at)
+ 		queue_delay_us = jiffies_to_usecs(jiffies - p->scx.runnable_at);
+ 
+-	ret = contract_effect_gate(CONTRACT_SCHED_PROG_ID,
++	ret = contract_effect_gate(
++				   contract_effect_policy_id(CONTRACT_EFFECT_SCHED_BOOST),
+ 				   CONTRACT_EFFECT_SCHED_BOOST, scope, 1,
+ 				   queue_delay_us);
+ 	contract_cross_check(scope);
+@@ -143,6 +145,9 @@
+ 	struct contract_ledger *ledger = contract_lookup_ledger(scope);
+ 
+ 	seq_printf(seq, "enabled=%u\n", contract_sched_gate_enabled);
++	seq_printf(seq, "policy_id=%llu\n",
++		   contract_effect_policy_id(CONTRACT_EFFECT_SCHED_DISPATCH));
++	seq_printf(seq, "scope=%u:%llu:%llu\n", scope.type, scope.primary_id, scope.secondary_id);
+ 	seq_printf(seq, "boost_budget=%llu\n", contract_sched_boost_budget);
+ 	seq_printf(seq, "throttled_boosts=%lld\n",
+ 		   atomic64_read(&contract_sched_throttled_boosts));

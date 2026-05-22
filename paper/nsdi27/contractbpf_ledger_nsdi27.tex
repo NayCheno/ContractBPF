@@ -281,75 +281,56 @@ We measure P50/P99/P999 latency, throughput, queue delay, boost events, pages de
 
 \subsection{Controlled QEMU matrix}
 
-\begin{table}[t]
-\centering
-\scriptsize
-\caption{Controlled QEMU matrix summary. Latencies are guest synthetic-service samples.}
-\begin{tabular}{lrrrr}
-\toprule
-Group & P99 us & Queue delay us & Demoted & Demote state \\
-\midrule
-G1 & 102716 & 0 & 0 & 0 \\
-G2 & 98907 & 15703000 & 0 & 0 \\
-G3 & 103104 & 0 & 3 & 4 \\
-G4 & 95487 & 74000 & 8 & 0 \\
-G5 & 100191 & 0 & 0 & 0 \\
-G6 & 81575 & 0 & 0 & 0 \\
-G7 & 97912 & 11076000 & 3 & 4 \\
-G8 & 97349 & 170000 & 8 & 0 \\
-G9 & 96559 & 73000 & 8 & 2 \\
-\bottomrule
-\end{tabular}
-\end{table}
+\input{generated/controlled_qemu_matrix_table.tex}
 
 The matrix produces raw logs under \texttt{experiments/results/raw/}, processed
 CSV tables under \texttt{experiments/results/processed/}, and five SVG figures:
-feedback timeline, tail latency, recovery, ablation, and overhead. In the
-controlled conflict, G4 records an unguarded combined scheduler-paging case
-with page demotion and refaults but no demote-page degradation. G9 records the
-full \sys path: the same demotion/refault condition reaches demote degrade state
-2, which corresponds to revoking demote\_page, while preserving scheduler
-dispatch. The recovery table marks G9 as recovered in one epoch and the
-whole-policy fallback as two epochs.
+feedback timeline, tail latency, recovery, ablation, and overhead. This
+controlled matrix is primarily an artifact plumbing and baseline-validation
+table; the latest naturally induced conflict and recovery evidence is reported
+separately below. The recovery table still records the \sys path reaching
+demote degrade state 2, which corresponds to revoking demote\_page, while
+preserving scheduler dispatch.
 
 \subsection{Real-service companion matrix}
 
-\begin{table}[t]
-\centering
-\scriptsize
-\caption{QEMU memcached companion matrix.}
-\begin{tabular}{lrrrrr}
-\toprule
-Group & P99 us & Tenant-B P99 & Queue us & Demoted & Demote state \\
-\midrule
-G1 & 1608 & 7482 & 0 & 0 & 0 \\
-G2 & 969 & 2508 & 0 & 0 & 0 \\
-G3 & 1221 & 1138 & 0 & 3 & 4 \\
-G4 & 1463 & 1787 & 12000 & 8 & 0 \\
-G5 & 1074 & 998 & 0 & 0 & 0 \\
-G6 & 867 & 2936 & 0 & 0 & 0 \\
-G7 & 809 & 3153 & 17109000 & 3 & 4 \\
-G8 & 839 & 1630 & 12000 & 8 & 0 \\
-G9 & 733 & 2732 & 77000 & 8 & 2 \\
-\bottomrule
-\end{tabular}
-\end{table}
+\input{generated/qemu_memcached_matrix_table.tex}
 
 The memcached matrix proves that the artifact can boot a guest, start real
 networked services, drive load, and collect latency samples across every
 baseline group. The raw log is
 the May 22 memcached-matrix QEMU log, and the processed table is
-\texttt{memcached\_matrix\_summary.csv}. The controlled conflict counters follow
-the same pattern as the synthetic matrix: G4 records demotion and refaults with
-no demote-page revocation, while G9 reaches demote degrade state 2 and records
-one-epoch recovery.
+\texttt{memcached\_matrix\_summary.csv}. This companion matrix is not the final
+conflict table; it establishes that the real-service QEMU harness can run every
+baseline group and produce auditable latency samples.
+
+\input{generated/qemu_memcached_natural_bars_table.tex}
+\IfFileExists{generated/native_memcached_bars_table.tex}{%
+\input{generated/native_memcached_bars_table.tex}
+Native non-QEMU memcached conflict and recovery bars are generated from the
+native final-evidence CSV and supersede the QEMU proxy for P5/P6 performance
+claims.
+}{}
+
+The natural-bars memcached run removes the controlled counter injection used by
+the companion matrix and instead drives real memory pressure in the QEMU guest.
+G4 naturally raises demotion, refault, and queue-delay counters, while G9
+reaches demote degrade state 2 and records a lower recovery-window P99. This is
+still QEMU evidence, so it does not replace the required non-QEMU P5/P6 final
+evaluation.
+
+\input{generated/qemu_no_violation_overhead_table.tex}
+
+The no-violation probe checks the current QEMU artifact's steady-state overhead
+when ContractBPF gates are installed but the cross-subsystem violation is not
+triggered. Production overhead claims still require non-QEMU runs.
 
 \subsection{Current findings}
 
 \begin{enumerate}[leftmargin=*]
     \item The kernel patch series builds, QEMU boots, sched\_ext loads and unloads, contractd starts, and kselftests exercise token, ledger, degrade, MM hook, and cross-subsystem paths.
-    \item The controlled unguarded scheduler-paging scenario records the feedback-loop counters needed for the thesis: queue delay, demotion, refaults, and no demote-page revocation.
-    \item The full \sys path detects the cross-subsystem condition and revokes only demote\_page while keeping scheduler dispatch intact.
+    \item The natural QEMU memory-pressure scenario records the feedback-loop counters needed for the thesis: queue delay, demotion, and refault or major-fault activity without \texttt{cross\_scenario} counter injection.
+    \item The full \sys path detects the cross-subsystem condition and revokes only demote\_page while keeping scheduler dispatch active.
     \item A real memcached service can run in QEMU across the full G1--G9 matrix and produce latency samples, but non-QEMU performance validation remains future work.
 \end{enumerate}
 

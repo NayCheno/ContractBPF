@@ -1,0 +1,14 @@
+diff -urN m23-base/kernel/bpf/contractbpf_core.c m23-current/kernel/bpf/contractbpf_core.c
+--- m23-base/kernel/bpf/contractbpf_core.c	2026-05-22 16:10:00.000000000 +0000
++++ m23-current/kernel/bpf/contractbpf_core.c	2026-05-22 16:10:00.000000000 +0000
+@@ -154,6 +154,10 @@
+ 	if (!ledger)
+ 		return CONTRACT_DENY;
+ 
++	if (effect < CONTRACT_EFFECT_MAX &&
++	    ledger->degrade_state[effect] >= CONTRACT_DEGRADE_REVOKE)
++		return CONTRACT_DEGRADED;
++
+ 	if (contract_would_exceed(ledger, &token_copy, cost)) {
+ 		contract_trigger_degrade(prog_id, effect, scope,
+ 					 "budget exceeded");

@@ -1,0 +1,22 @@
+policy: stale_paging_B
+subsystem: mm
+scope:
+  type: memcg
+  id: service-B
+effects:
+  - name: demote_page
+    budget:
+      max_pages_per_epoch: 60000
+      max_refault_ratio: 1.5
+      max_fault_latency_us: 150
+    degrade:
+      level1: throttle_demote
+      level2: revoke_demote
+      level3: kernel_default_reclaim
+  - name: reclaim_hint
+    budget:
+      max_hints_per_epoch: 25000
+    degrade:
+      level1: ignore_hint
+      level2: revoke_reclaim_hint
+      level3: kernel_default_reclaim

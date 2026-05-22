@@ -1,0 +1,40 @@
+diff -urN m17-base/kernel/bpf/contractbpf_mm.c m17-current/kernel/bpf/contractbpf_mm.c
+--- m17-base/kernel/bpf/contractbpf_mm.c	2026-05-22 14:30:00.000000000 +0000
++++ m17-current/kernel/bpf/contractbpf_mm.c	2026-05-22 14:30:00.000000000 +0000
+@@ -64,8 +64,6 @@
+ void contract_mm_set_enabled(bool enabled)
+ {
+ 	contract_mm_gate_enabled = enabled;
+-	if (enabled)
+-		contract_mm_install_tokens(contract_mm_scope());
+ }
+ 
+ static void contract_mm_record_refault_pages(struct contract_scope_id scope,
+@@ -220,5 +218,7 @@
+ 
+ 	enable = buf[0] != '0';
+ 	contract_mm_set_enabled(enable);
++	if (enable)
++		contract_mm_install_tokens(contract_mm_scope());
+ 	return count;
+ }
+diff -urN m17-base/kernel/bpf/contractbpf_sched.c m17-current/kernel/bpf/contractbpf_sched.c
+--- m17-base/kernel/bpf/contractbpf_sched.c	2026-05-22 14:30:00.000000000 +0000
++++ m17-current/kernel/bpf/contractbpf_sched.c	2026-05-22 14:30:00.000000000 +0000
+@@ -41,8 +41,6 @@
+ void contract_sched_set_enabled(bool enabled)
+ {
+ 	contract_sched_gate_enabled = enabled;
+-	if (enabled)
+-		contract_sched_install_tokens(contract_sched_scope());
+ }
+ 
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+@@ -112,5 +110,7 @@
+ 
+ 	enable = buf[0] != '0';
+ 	contract_sched_set_enabled(enable);
++	if (enable)
++		contract_sched_install_tokens(contract_sched_scope());
+ 	return count;
+ }

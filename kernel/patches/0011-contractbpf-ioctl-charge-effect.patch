@@ -1,0 +1,76 @@
+diff -urN m11-base/include/linux/contractbpf.h m11-current/include/linux/contractbpf.h
+--- m11-base/include/linux/contractbpf.h	2026-05-22 13:10:00.000000000 +0000
++++ m11-current/include/linux/contractbpf.h	2026-05-22 13:10:00.000000000 +0000
+@@ -95,6 +95,17 @@
+ 	u32 degrade_state;
+ 	u32 reserved2;
+ };
+ 
++struct contract_ioctl_charge {
++	u64 prog_id;
++	u32 effect;
++	u32 reserved;
++	struct contract_ioctl_scope scope;
++	u64 cost_primary;
++	u64 cost_secondary;
++	s32 result;
++	u32 reserved2;
++};
++
+ struct contract_ioctl_snapshot {
+ 	struct contract_ioctl_scope scope;
+ 	u64 sched_queue_delay_us;
+@@ -118,6 +129,8 @@
+ 	_IOWR(CONTRACTBPF_IOC_MAGIC, 2, struct contract_ioctl_snapshot)
+ #define CONTRACTBPF_IOC_RESET_TEST \
+ 	_IO(CONTRACTBPF_IOC_MAGIC, 3)
++#define CONTRACTBPF_IOC_CHARGE_EFFECT \
++	_IOWR(CONTRACTBPF_IOC_MAGIC, 4, struct contract_ioctl_charge)
+ 
+ #ifdef CONFIG_CONTRACTBPF
+ int contract_register_token(const struct contract_effect_token *token);
+diff -urN m11-base/kernel/bpf/contractbpf_control.c m11-current/kernel/bpf/contractbpf_control.c
+--- m11-base/kernel/bpf/contractbpf_control.c	2026-05-22 13:10:00.000000000 +0000
++++ m11-current/kernel/bpf/contractbpf_control.c	2026-05-22 13:10:00.000000000 +0000
+@@ -109,6 +109,32 @@
+ 
+ 	return 0;
+ }
++
++static long contract_ioctl_charge_effect(unsigned long arg)
++{
++	struct contract_ioctl_charge charge;
++	struct contract_scope_id scope;
++	int ret;
++
++	if (copy_from_user(&charge, (void __user *)arg, sizeof(charge)))
++		return -EFAULT;
++
++	if (!charge.prog_id || charge.effect >= CONTRACT_EFFECT_MAX)
++		return -EINVAL;
++
++	scope = contract_scope_from_ioctl(&charge.scope);
++	if (!contract_lookup_token(charge.prog_id, charge.effect, scope))
++		return -ENOENT;
++
++	ret = contract_effect_gate(charge.prog_id, charge.effect, scope,
++				   charge.cost_primary, charge.cost_secondary);
++	charge.result = ret;
++
++	if (copy_to_user((void __user *)arg, &charge, sizeof(charge)))
++		return -EFAULT;
++
++	return 0;
++}
+ 
+ static long contractbpf_ioctl(struct file *file, unsigned int cmd,
+ 			      unsigned long arg)
+@@ -123,6 +148,8 @@
+ 		contract_reset_for_tests();
+ 		contract_identity_reset_for_tests();
+ 		return 0;
++	case CONTRACTBPF_IOC_CHARGE_EFFECT:
++		return contract_ioctl_charge_effect(arg);
+ 	default:
+ 		return -ENOTTY;
+ 	}

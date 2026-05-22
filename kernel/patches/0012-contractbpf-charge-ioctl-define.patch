@@ -1,0 +1,12 @@
+diff -urN m12-base/include/linux/contractbpf.h m12-current/include/linux/contractbpf.h
+--- m12-base/include/linux/contractbpf.h	2026-05-22 13:20:00.000000000 +0000
++++ m12-current/include/linux/contractbpf.h	2026-05-22 13:20:00.000000000 +0000
+@@ -126,6 +126,8 @@
+ 	_IOWR(CONTRACTBPF_IOC_MAGIC, 2, struct contract_ioctl_snapshot)
+ #define CONTRACTBPF_IOC_RESET_TEST \
+ 	_IO(CONTRACTBPF_IOC_MAGIC, 3)
++#define CONTRACTBPF_IOC_CHARGE_EFFECT \
++	_IOWR(CONTRACTBPF_IOC_MAGIC, 4, struct contract_ioctl_charge)
+ 
+ #ifdef CONFIG_CONTRACTBPF
+ int contract_register_token(const struct contract_effect_token *token);

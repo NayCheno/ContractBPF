@@ -1,0 +1,14 @@
+diff -urN m19-base/include/linux/contractbpf.h m19-current/include/linux/contractbpf.h
+--- m19-base/include/linux/contractbpf.h	2026-05-22 15:15:00.000000000 +0000
++++ m19-current/include/linux/contractbpf.h	2026-05-22 15:15:00.000000000 +0000
+@@ -90,8 +90,8 @@
+ 	u32 recent_refaults;
+ 	u32 recent_major_faults;
+ 	u64 recent_fault_latency_us;
+-	u64 flags;
+-	u64 reserved;
++	u32 flags;
++	u32 reserved;
+ };
+ 
+ enum contract_ioctl_subsystem {

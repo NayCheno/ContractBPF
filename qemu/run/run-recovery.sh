@@ -28,6 +28,7 @@ printf 'Conflict log: %s\n' "$CONFLICT_LOG" | tee -a "$LOG"
 
 python3 - "$CONFLICT_LOG" "$CSV" <<'PY'
 import csv
+import re
 import sys
 
 log_path, csv_path = sys.argv[1], sys.argv[2]
@@ -69,21 +70,30 @@ fields = [
     "recovered",
 ]
 
+numeric_fields = set(fields) - {"mode"}
+
+
+def leading_int(value):
+    match = re.match(r"\s*(-?\d+)", str(value))
+    return match.group(1) if match else "0"
+
 with open(csv_path, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fields)
     writer.writeheader()
     for epoch, mode in enumerate(required):
         snapshot = snapshots[mode]
         row = {
-            "epoch": epoch,
+            "epoch": str(epoch),
             "mode": mode,
             "sched_queue_delay_us": snapshot.get("sched_queue_delay_us", "0"),
             "pages_demoted": snapshot.get("pages_demoted", "0"),
             "refault_events": snapshot.get("refault_events", "0"),
             "sched_degrade_state": snapshot.get("sched_degrade_state", "0"),
             "demote_degrade_state": snapshot.get("demote_degrade_state", "0"),
-            "recovered": "1" if mode == "guarded" and int(snapshot.get("demote_degrade_state", "0")) >= 2 else "0",
         }
+        for field in numeric_fields:
+            row[field] = leading_int(row.get(field, "0"))
+        row["recovered"] = "1" if mode == "guarded" and int(row["demote_degrade_state"]) >= 2 else "0"
         writer.writerow(row)
 PY
 

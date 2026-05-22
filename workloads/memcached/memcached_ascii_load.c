@@ -80,22 +80,26 @@ static int write_all(int fd, const char *buf, size_t len)
 static int read_until(int fd, const char *needle)
 {
     char buf[4096];
-    size_t used = 0;
     size_t needle_len = strlen(needle);
+    size_t matched = 0;
 
-    while (used + 1 < sizeof(buf)) {
-        ssize_t n = read(fd, buf + used, sizeof(buf) - used - 1);
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
 
         if (n < 0 && errno == EINTR)
             continue;
         if (n <= 0)
             return -1;
-        used += (size_t)n;
-        buf[used] = '\0';
-        if (used >= needle_len && strstr(buf, needle))
-            return 0;
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == needle[matched]) {
+                matched++;
+                if (matched == needle_len)
+                    return 0;
+            } else {
+                matched = buf[i] == needle[0] ? 1 : 0;
+            }
+        }
     }
-    return -1;
 }
 
 static int request(int fd, const char *payload, const char *needle, uint64_t *latency_us)
@@ -129,10 +133,12 @@ int main(int argc, char **argv)
 {
     int port = (int)(argc > 1 ? parse_long(argv[1], 11211) : 11211);
     long ops = argc > 2 ? parse_long(argv[2], 100) : 100;
+    long value_bytes = argc > 3 ? parse_long(argv[3], 16) : 16;
     int fd = connect_loopback(port);
     uint64_t total = 0;
     uint64_t max = 0;
     long samples = 0;
+    char *value;
 
     if (fd < 0) {
         bring_loopback_up();
@@ -154,21 +160,41 @@ int main(int argc, char **argv)
         (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     }
 
+    if (value_bytes > 1024 * 1024)
+        value_bytes = 1024 * 1024;
+    value = calloc((size_t)value_bytes + 1, 1);
+    if (!value) {
+        perror("calloc");
+        close(fd);
+        return 1;
+    }
+    memset(value, 'x', (size_t)value_bytes);
+
     for (long i = 0; i < ops; i++) {
-        const char *value = "contractbpf-value";
-        char set_cmd[256];
+        size_t set_len = (size_t)value_bytes + 128;
+        char *set_cmd = malloc(set_len);
         char get_cmd[128];
         uint64_t latency;
 
-        snprintf(set_cmd, sizeof(set_cmd),
-                 "set contractbpf:%ld 0 30 %zu\r\n%s\r\n", i, strlen(value), value);
+        if (!set_cmd) {
+            perror("malloc");
+            free(value);
+            close(fd);
+            return 1;
+        }
+
+        snprintf(set_cmd, set_len,
+                 "set contractbpf:%ld 0 30 %ld\r\n%s\r\n", i, value_bytes, value);
         snprintf(get_cmd, sizeof(get_cmd), "get contractbpf:%ld\r\n", i);
 
         if (request(fd, set_cmd, "STORED\r\n", &latency) != 0) {
             perror("set");
+            free(set_cmd);
+            free(value);
             close(fd);
             return 1;
         }
+        free(set_cmd);
         printf("LATENCY_SAMPLE_US=%llu\n", (unsigned long long)latency);
         total += latency;
         if (latency > max)
@@ -177,6 +203,7 @@ int main(int argc, char **argv)
 
         if (request(fd, get_cmd, "END\r\n", &latency) != 0) {
             perror("get");
+            free(value);
             close(fd);
             return 1;
         }
@@ -187,6 +214,7 @@ int main(int argc, char **argv)
         samples++;
     }
 
+    free(value);
     close(fd);
     printf("ops=%ld\n", samples);
     printf("avg_latency_us=%llu\n",

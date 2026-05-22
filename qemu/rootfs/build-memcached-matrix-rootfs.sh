@@ -8,6 +8,7 @@ DEB_DIR="$ROOT/build/memcached-pkgs/debs"
 OUT="$ROOT/qemu/images/memcached-matrix-initramfs.cpio.gz"
 LOAD_BIN="${LOAD_BIN:-$ROOT/workloads/memcached/memcached_ascii_load}"
 SCX_BOOST="${SCX_BOOST:-$ROOT/build/scx/build/bin/scx_contract_boost}"
+CONTRACTCTL="${CONTRACTCTL:-$ROOT/userspace/contractctl/target/debug/contractctl}"
 CC_BIN="${CC:-cc}"
 
 copy_one() {
@@ -103,10 +104,16 @@ if [ ! -x "$SCX_BOOST" ]; then
     exit 1
 fi
 
+if [ ! -x "$CONTRACTCTL" ]; then
+    echo "ERROR: contractctl missing: $CONTRACTCTL" >&2
+    echo "Run: cargo build --manifest-path $ROOT/userspace/contractctl/Cargo.toml" >&2
+    exit 1
+fi
+
 MEMCACHED_REAL_BIN="$(prepare_memcached)"
 
 rm -rf "$WORK"
-mkdir -p "$WORK/bin" "$WORK/dev" "$WORK/etc" "$WORK/proc" "$WORK/sys/kernel/debug" "$WORK/sys/fs/cgroup" "$WORK/tmp" "$WORK/usr/local/bin" "$(dirname "$OUT")"
+mkdir -p "$WORK/bin" "$WORK/dev" "$WORK/etc/contractbpf" "$WORK/proc" "$WORK/sys/kernel/debug" "$WORK/sys/fs/cgroup" "$WORK/tmp" "$WORK/usr/local/bin" "$(dirname "$OUT")"
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "$WORK/etc/passwd"
 printf 'root:x:0:\n' > "$WORK/etc/group"
 
@@ -123,6 +130,11 @@ copy_bin /bin/sleep
 copy_bin "$MEMCACHED_REAL_BIN" /usr/local/bin/memcached
 copy_bin "$LOAD_BIN" /usr/local/bin/memcached_ascii_load
 copy_bin "$SCX_BOOST" /usr/local/bin/scx_contract_boost
+copy_bin "$CONTRACTCTL" /usr/local/bin/contractctl
+cp "$ROOT/bpf/contracts/service_a_sched.yaml" "$WORK/etc/contractbpf/service_a_sched.yaml"
+cp "$ROOT/bpf/contracts/service_a_paging.yaml" "$WORK/etc/contractbpf/service_a_paging.yaml"
+cp "$ROOT/bpf/contracts/service_b_sched.yaml" "$WORK/etc/contractbpf/service_b_sched.yaml"
+cp "$ROOT/bpf/contracts/service_b_paging.yaml" "$WORK/etc/contractbpf/service_b_paging.yaml"
 
 cp "$ROOT/qemu/rootfs/memcached-matrix-init.sh" "$WORK/init"
 chmod 0755 "$WORK/init"

@@ -1,0 +1,68 @@
+diff -urN m22-base/include/linux/contractbpf.h m22-current/include/linux/contractbpf.h
+--- m22-base/include/linux/contractbpf.h	2026-05-22 16:05:00.000000000 +0000
++++ m22-current/include/linux/contractbpf.h	2026-05-22 16:05:00.000000000 +0000
+@@ -194,6 +194,7 @@
+ void contract_reset_for_tests(void);
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+ 				 u64 *effective_slice);
++void contract_sched_record_run(struct task_struct *p);
+ void contract_sched_debugfs_init(struct dentry *root);
+ void contract_sched_set_enabled(bool enabled);
+ bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages);
+@@ -257,6 +258,10 @@
+ {
+ }
+ 
++static inline void contract_sched_record_run(struct task_struct *p)
++{
++}
++
+ static inline void contract_sched_debugfs_init(struct dentry *root)
+ {
+ }
+diff -urN m22-base/kernel/bpf/contractbpf_sched.c m22-current/kernel/bpf/contractbpf_sched.c
+--- m22-base/kernel/bpf/contractbpf_sched.c	2026-05-22 16:05:00.000000000 +0000
++++ m22-current/kernel/bpf/contractbpf_sched.c	2026-05-22 16:05:00.000000000 +0000
+@@ -96,6 +96,31 @@
+ 	}
+ }
+ 
++void contract_sched_record_run(struct task_struct *p)
++{
++	struct contract_scope_id scope;
++	u64 queue_delay_us;
++
++	if (!contract_sched_gate_enabled || !p)
++		return;
++
++	scope = contract_task_scope(p);
++	if (!contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH, scope) ||
++	    !contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope))
++		return;
++
++	if (!p->scx.runnable_at || time_before(jiffies, p->scx.runnable_at))
++		return;
++
++	queue_delay_us = jiffies_to_usecs(jiffies - p->scx.runnable_at);
++	if (!queue_delay_us)
++		return;
++
++	contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_BOOST, 0,
++			       queue_delay_us);
++	contract_cross_check(scope);
++}
++
+ static ssize_t contract_sched_enable_write(struct file *file,
+ 					   const char __user *user_buf,
+ 					   size_t count, loff_t *ppos)
+diff -urN m22-base/kernel/sched/ext.c m22-current/kernel/sched/ext.c
+--- m22-base/kernel/sched/ext.c	2026-05-22 16:05:00.000000000 +0000
++++ m22-current/kernel/sched/ext.c	2026-05-22 16:05:00.000000000 +0000
+@@ -2911,6 +2911,7 @@
+ 	if (SCX_HAS_OP(running) && (p->scx.flags & SCX_TASK_QUEUED))
+ 		SCX_CALL_OP_TASK(SCX_KF_REST, running, p);
+ 
++	contract_sched_record_run(p);
+ 	clr_task_runnable(p, true);
+ 
+ 	/*

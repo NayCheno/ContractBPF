@@ -1,0 +1,25 @@
+{
+  "generated_by": "experiments/analysis/generate_paper_tables.py",
+  "tables": [
+    {
+      "sha256": "2c01bcbea1d19950817281b3ce4aa0fa25938e565394820dbfa524fee1924db4",
+      "source": "experiments/results/processed/matrix_summary.csv",
+      "table": "paper/nsdi27/generated/controlled_qemu_matrix_table.tex"
+    },
+    {
+      "sha256": "200df92b6a0943f1e813aff9d03832aeea1f431d4941388445a5451269298837",
+      "source": "experiments/results/processed/memcached_matrix_summary.csv",
+      "table": "paper/nsdi27/generated/qemu_memcached_matrix_table.tex"
+    },
+    {
+      "sha256": "824233f2c89620dc452d8de5f340a6406a166b4ec7548f534a5e281f6541abb9",
+      "source": "experiments/results/processed/memcached_natural_bars.csv",
+      "table": "paper/nsdi27/generated/qemu_memcached_natural_bars_table.tex"
+    },
+    {
+      "sha256": "1fa241066f7199b293fee7f34c1a9460156f0146c238cbc09cdc76f5e6aa1526",
+      "source": "experiments/results/processed/no_violation_overhead.csv",
+      "table": "paper/nsdi27/generated/qemu_no_violation_overhead_table.tex"
+    }
+  ]
+}

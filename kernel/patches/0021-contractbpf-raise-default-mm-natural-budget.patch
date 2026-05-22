@@ -1,0 +1,12 @@
+diff -urN m21-base/kernel/bpf/contractbpf_mm.c m21-current/kernel/bpf/contractbpf_mm.c
+--- m21-base/kernel/bpf/contractbpf_mm.c	2026-05-22 15:30:00.000000000 +0000
++++ m21-current/kernel/bpf/contractbpf_mm.c	2026-05-22 15:30:00.000000000 +0000
+@@ -22,7 +22,7 @@
+ #define CONTRACT_MM_SIM_FAULT_LATENCY_US 250
+ 
+ static bool contract_mm_gate_enabled;
+-static u64 contract_mm_demote_budget = 8;
++static u64 contract_mm_demote_budget = 10000000;
+ static u64 contract_mm_reclaim_hint_budget = 1024;
+ static atomic64_t contract_mm_throttled_demotes;
+ static atomic64_t contract_mm_revoked_demotes;

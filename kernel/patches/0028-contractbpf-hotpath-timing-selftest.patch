@@ -1,0 +1,208 @@
+diff -urN m28-base/kernel/bpf/contractbpf_core.c m28-current/kernel/bpf/contractbpf_core.c
+--- m28-base/kernel/bpf/contractbpf_core.c	2026-05-22 16:45:00.000000000 +0000
++++ m28-current/kernel/bpf/contractbpf_core.c	2026-05-22 16:45:00.000000000 +0000
+@@ -5,16 +5,23 @@
+ #include <linux/fs.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/sort.h>
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+ 
+ #define CONTRACT_MAX_TOKENS 64
++#define CONTRACT_HOTPATH_SAMPLES 101
++#define CONTRACT_HOTPATH_BATCH 1000
++#define CONTRACT_HOTPATH_SCHED_MAX_NS 200
++#define CONTRACT_HOTPATH_MM_MAX_NS 500
+ 
+ static DEFINE_SPINLOCK(contract_token_lock);
+ static struct contract_effect_token contract_tokens[CONTRACT_MAX_TOKENS];
+ static bool contract_token_used[CONTRACT_MAX_TOKENS];
+ static struct dentry *contract_debugfs_dir;
+@@ -42,6 +49,23 @@
+ 	return NULL;
+ }
+ 
++static struct contract_effect_token *
++contract_find_token(u64 prog_id, enum contract_effect_type effect,
++		    struct contract_scope_id scope)
++{
++	int i;
++
++	for (i = 0; i < CONTRACT_MAX_TOKENS; i++) {
++		if (READ_ONCE(contract_token_used[i]) &&
++		    contract_tokens[i].prog_id == prog_id &&
++		    contract_tokens[i].effect == effect &&
++		    contract_scope_equal(contract_tokens[i].scope, scope))
++			return &contract_tokens[i];
++	}
++
++	return NULL;
++}
++
+ u64 contract_effect_policy_id_for_scope(enum contract_effect_type effect,
+ 					struct contract_scope_id scope)
+ {
+@@ -116,7 +139,7 @@
+ 	}
+ 
+ 	contract_tokens[free_slot] = *token;
+-	contract_token_used[free_slot] = true;
++	WRITE_ONCE(contract_token_used[free_slot], true);
+ 	spin_unlock_irqrestore(&contract_token_lock, flags);
+ 	return 0;
+ }
+@@ -134,14 +157,19 @@
+ 	struct contract_ledger *ledger;
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&contract_token_lock, flags);
+-	token = contract_lookup_token(prog_id, effect, scope);
++	token = contract_find_token(prog_id, effect, scope);
+ 	if (!token) {
+-		spin_unlock_irqrestore(&contract_token_lock, flags);
+-		return CONTRACT_DENY;
++		spin_lock_irqsave(&contract_token_lock, flags);
++		token = contract_lookup_token(prog_id, effect, scope);
++		if (!token) {
++			spin_unlock_irqrestore(&contract_token_lock, flags);
++			return CONTRACT_DENY;
++		}
++		token_copy = *token;
++		spin_unlock_irqrestore(&contract_token_lock, flags);
++	} else {
++		token_copy = *token;
+ 	}
+-	token_copy = *token;
+-	spin_unlock_irqrestore(&contract_token_lock, flags);
+ 
+ 	ledger = contract_lookup_ledger(scope);
+ 	if (!ledger)
+@@ -249,6 +276,112 @@
+ 	.read = contract_selftest_read,
+ };
+ 
++static int contract_u64_cmp(const void *a, const void *b)
++{
++	u64 va = *(const u64 *)a;
++	u64 vb = *(const u64 *)b;
++
++	return (va > vb) - (va < vb);
++}
++
++static int contract_measure_gate(enum contract_effect_type effect, u64 prog_id,
++				 u64 scope_id, u64 *median_ns,
++				 u64 *events_per_sec)
++{
++	struct contract_scope_id scope = {
++		.type = 1,
++		.primary_id = scope_id,
++	};
++	struct contract_effect_token token = {
++		.prog_id = prog_id,
++		.scope = scope,
++		.effect = effect,
++		.budget_primary = 1000000000ULL,
++		.budget_secondary = 1000000000ULL,
++		.epoch_ns = NSEC_PER_SEC,
++	};
++	u64 samples[CONTRACT_HOTPATH_SAMPLES];
++	u64 start_ns, duration_ns, median;
++	int ret, sample, i;
++
++	contract_reset_for_tests();
++	ret = contract_register_token(&token);
++	if (ret)
++		return ret;
++
++	/* Pre-create the ledger so samples measure the existing-ledger path. */
++	contract_ledger_charge(scope, effect, 0, 0);
++
++	for (sample = 0; sample < CONTRACT_HOTPATH_SAMPLES; sample++) {
++		start_ns = ktime_get_ns();
++		for (i = 0; i < CONTRACT_HOTPATH_BATCH; i++) {
++			ret = contract_effect_gate(prog_id, effect, scope, 1, 0);
++			if (ret != CONTRACT_ALLOW)
++				return -EIO;
++		}
++		duration_ns = ktime_get_ns() - start_ns;
++		if (!duration_ns)
++			duration_ns = 1;
++		samples[sample] = div64_u64(duration_ns,
++					    CONTRACT_HOTPATH_BATCH);
++	}
++
++	sort(samples, CONTRACT_HOTPATH_SAMPLES, sizeof(samples[0]),
++	     contract_u64_cmp, NULL);
++	median = samples[CONTRACT_HOTPATH_SAMPLES / 2];
++	if (!median)
++		median = 1;
++
++	*median_ns = median;
++	*events_per_sec = div64_u64(NSEC_PER_SEC, median);
++	return 0;
++}
++
++static int contract_hotpath_timing_show(struct seq_file *seq, void *v)
++{
++	u64 sched_median_ns = 0, sched_events_per_sec = 0;
++	u64 mm_median_ns = 0, mm_events_per_sec = 0;
++	int ret;
++
++	ret = contract_measure_gate(CONTRACT_EFFECT_SCHED_BOOST, 0x51000, 510,
++				    &sched_median_ns,
++				    &sched_events_per_sec);
++	if (ret) {
++		seq_printf(seq, "CONTRACTBPF_HOTPATH_TIMING_FAIL ret=%d phase=sched\n",
++			   ret);
++		return 0;
++	}
++
++	ret = contract_measure_gate(CONTRACT_EFFECT_MM_DEMOTE_PAGE, 0x52000,
++				    520, &mm_median_ns, &mm_events_per_sec);
++	if (ret) {
++		seq_printf(seq, "CONTRACTBPF_HOTPATH_TIMING_FAIL ret=%d phase=mm\n",
++			   ret);
++		return 0;
++	}
++
++	contract_reset_for_tests();
++
++	seq_puts(seq, "CONTRACTBPF_HOTPATH_TIMING_OK\n");
++	seq_printf(seq, "scheduler_gate_median_ns=%llu\n", sched_median_ns);
++	seq_printf(seq, "scheduler_gate_events_per_sec=%llu\n",
++		   sched_events_per_sec);
++	seq_printf(seq, "scheduler_gate_target_ns=%u\n",
++		   CONTRACT_HOTPATH_SCHED_MAX_NS);
++	seq_printf(seq, "mm_gate_median_ns=%llu\n", mm_median_ns);
++	seq_printf(seq, "mm_gate_events_per_sec=%llu\n", mm_events_per_sec);
++	seq_printf(seq, "mm_gate_target_ns=%u\n", CONTRACT_HOTPATH_MM_MAX_NS);
++
++	if (sched_median_ns <= CONTRACT_HOTPATH_SCHED_MAX_NS &&
++	    mm_median_ns <= CONTRACT_HOTPATH_MM_MAX_NS)
++		seq_puts(seq, "CONTRACTBPF_HOTPATH_GATE_OK\n");
++	else
++		seq_puts(seq, "CONTRACTBPF_HOTPATH_GATE_FAIL\n");
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(contract_hotpath_timing);
++
+ static int __init contractbpf_init(void)
+ {
+ 	contract_debugfs_dir = debugfs_create_dir("contractbpf", NULL);
+@@ -256,6 +382,8 @@
+ 			    &contract_selftest_fops);
+ 	contract_ledger_debugfs_init(contract_debugfs_dir);
+ 	contract_sched_debugfs_init(contract_debugfs_dir);
++	debugfs_create_file("hotpath_timing", 0444, contract_debugfs_dir, NULL,
++			    &contract_hotpath_timing_fops);
+ 	contract_mm_debugfs_init(contract_debugfs_dir);
+ 	contract_cross_debugfs_init(contract_debugfs_dir);
+ 	return 0;

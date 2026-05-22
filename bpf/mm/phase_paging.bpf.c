@@ -1,8 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
 #include "../include/contract_mm.bpf.h"
 
-int contract_phase_paging_decide(const struct contract_mm_region_state *state)
+SEC("syscall")
+int contract_phase_paging_decide(void *ctx)
 {
+    const struct contract_mm_region_state *state = contract_mm_state_get();
+
+    (void)ctx;
     if (!state)
         return CONTRACT_MM_NO_OP;
 
@@ -14,3 +20,5 @@ int contract_phase_paging_decide(const struct contract_mm_region_state *state)
         return CONTRACT_MM_RECLAIM_HINT;
     return CONTRACT_MM_KEEP;
 }
+
+char LICENSE[] SEC("license") = "GPL";

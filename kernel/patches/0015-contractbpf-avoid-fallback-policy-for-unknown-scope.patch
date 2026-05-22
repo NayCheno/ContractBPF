@@ -1,0 +1,70 @@
+diff -urN m15-base/kernel/bpf/contractbpf_core.c m15-current/kernel/bpf/contractbpf_core.c
+--- m15-base/kernel/bpf/contractbpf_core.c	2026-05-22 14:00:00.000000000 +0000
++++ m15-current/kernel/bpf/contractbpf_core.c	2026-05-22 14:00:00.000000000 +0000
+@@ -51,6 +51,7 @@
+ {
+ 	unsigned long flags;
+ 	u64 prog_id = 0;
++	bool saw_effect_token = false;
+ 	int i;
+ 
+ 	if (effect >= CONTRACT_EFFECT_MAX)
+@@ -61,6 +62,9 @@
+ 		if (!contract_token_used[i])
+ 			continue;
+ 		if (contract_tokens[i].effect == effect &&
++		    !contract_scope_equal(contract_tokens[i].scope, scope))
++			saw_effect_token = true;
++		if (contract_tokens[i].effect == effect &&
+ 		    contract_scope_equal(contract_tokens[i].scope, scope)) {
+ 			prog_id = contract_tokens[i].prog_id;
+ 			break;
+@@ -71,5 +75,8 @@
+ 	if (prog_id)
+ 		return prog_id;
+ 
++	if (saw_effect_token)
++		return 0;
++
+ 	return contract_effect_policy_id(effect);
+ }
+diff -urN m15-base/kernel/bpf/contractbpf_mm.c m15-current/kernel/bpf/contractbpf_mm.c
+--- m15-base/kernel/bpf/contractbpf_mm.c	2026-05-22 14:00:00.000000000 +0000
++++ m15-current/kernel/bpf/contractbpf_mm.c	2026-05-22 14:00:00.000000000 +0000
+@@ -84,5 +84,6 @@
+ 			      unsigned int nr_pages)
+ {
++	enum contract_effect_type effect;
+ 	struct contract_ledger *ledger;
+ 	u32 degrade_state = CONTRACT_DEGRADE_REVOKE;
+ 	int ret;
+@@ -91,5 +92,15 @@
+ 	if (!contract_mm_gate_enabled)
+ 		return decision;
+ 
++	if (decision == CONTRACT_MM_DEMOTE)
++		effect = CONTRACT_EFFECT_MM_DEMOTE_PAGE;
++	else if (decision == CONTRACT_MM_RECLAIM_HINT)
++		effect = CONTRACT_EFFECT_MM_RECLAIM_HINT;
++	else
++		return decision;
++
++	if (!contract_effect_policy_id_for_scope(effect, scope))
++		return decision;
++
+ 	nr_pages = nr_pages ?: 1;
+ 	contract_mm_install_tokens(scope);
+diff -urN m15-base/kernel/bpf/contractbpf_sched.c m15-current/kernel/bpf/contractbpf_sched.c
+--- m15-base/kernel/bpf/contractbpf_sched.c	2026-05-22 14:00:00.000000000 +0000
++++ m15-current/kernel/bpf/contractbpf_sched.c	2026-05-22 14:00:00.000000000 +0000
+@@ -50,6 +50,10 @@
+ 	if (!contract_sched_gate_enabled)
+ 		return;
+ 
++	if (!contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH, scope) ||
++	    !contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope))
++		return;
++
+ 	contract_sched_install_tokens(scope);
+ 
+ 	ret = contract_effect_gate(

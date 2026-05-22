@@ -33,6 +33,7 @@ fi
     --enable CGROUPS \
     --enable CGROUP_BPF \
     --enable MEMCG \
+    --enable ACPI_HMAT \
     --enable NAMESPACES \
     --enable BLK_DEV_INITRD \
     --enable DEVTMPFS \
@@ -62,7 +63,8 @@ for symbol in \
     CONFIG_SCHED_CLASS_EXT \
     CONFIG_CGROUPS \
     CONFIG_CGROUP_BPF \
-    CONFIG_MEMCG
+    CONFIG_MEMCG \
+    CONFIG_ACPI_HMAT
 do
     if ! grep -q "^${symbol}=y$" "$SRC_DIR/.config"; then
         echo "ERROR: ${symbol}=y missing after olddefconfig" >&2

@@ -34,7 +34,7 @@ else
 fi
 
 CMD=(timeout "$TIMEOUT" "$QEMU_BIN" "${KVM_ARGS[@]}" \
-    -smp "${QEMU_SMP:-2}" \
+    -smp "${QEMU_SMP:-1}" \
     -m "${QEMU_MEM:-2048}" \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \

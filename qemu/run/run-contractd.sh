@@ -57,7 +57,8 @@ printf 'QEMU exit status: %s\n' "$status" >> "$LOG"
 
 for marker in \
     CONTRACTBPF_BOOT_OK \
-    CONTRACTBPF_CONTRACTD_OK
+    CONTRACTBPF_CONTRACTD_OK \
+    CONTRACTBPF_CONTRACTCTL_OK
 do
     if ! grep -q "$marker" "$LOG"; then
         echo "FAIL: $marker missing; log: $LOG" >&2

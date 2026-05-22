@@ -1,0 +1,451 @@
+diff -urN m13-base/include/linux/contractbpf.h m13-current/include/linux/contractbpf.h
+--- m13-base/include/linux/contractbpf.h	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/include/linux/contractbpf.h	2026-05-22 13:30:00.000000000 +0000
+@@ -8,6 +8,7 @@
+ 
+ struct dentry;
+ struct folio;
++struct mem_cgroup;
+ struct task_struct;
+ 
+ enum contract_effect_type {
+@@ -149,7 +150,7 @@
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+ 				 u64 *effective_slice);
+ void contract_sched_debugfs_init(struct dentry *root);
+-bool contract_mm_demote_allowed(unsigned int nr_pages);
++bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages);
+ void contract_mm_record_refault(struct folio *folio);
+ void contract_mm_record_major_fault(u64 latency_us);
+ void contract_mm_debugfs_init(struct dentry *root);
+@@ -157,7 +158,13 @@
+ void contract_cross_check(struct contract_scope_id scope);
+ u64 contract_effect_policy_id(enum contract_effect_type effect);
+ struct contract_scope_id contract_effect_scope(enum contract_effect_type effect);
++u64 contract_effect_policy_id_for_scope(enum contract_effect_type effect,
++					struct contract_scope_id scope);
++struct contract_scope_id contract_task_scope(struct task_struct *task);
++struct contract_scope_id contract_memcg_scope(struct mem_cgroup *memcg);
++struct contract_scope_id contract_current_memcg_scope(void);
++struct contract_scope_id contract_folio_scope(struct folio *folio);
+ void contract_note_installed_token(const struct contract_effect_token *token);
+ void contract_identity_reset_for_tests(void);
+ void contract_cross_debugfs_init(struct dentry *root);
+ struct contract_effect_token *contract_lookup_token(u64 prog_id,
+@@ -204,7 +212,8 @@
+ {
+ }
+ 
+-static inline bool contract_mm_demote_allowed(unsigned int nr_pages)
++static inline bool contract_mm_demote_allowed(struct folio *folio,
++					      unsigned int nr_pages)
+ {
+ 	return true;
+ }
+@@ -236,12 +245,40 @@
+ 	return 0;
+ }
+ 
++static inline u64
++contract_effect_policy_id_for_scope(enum contract_effect_type effect,
++				    struct contract_scope_id scope)
++{
++	return 0;
++}
++
+ static inline struct contract_scope_id
+ contract_effect_scope(enum contract_effect_type effect)
+ {
+ 	return (struct contract_scope_id){};
+ }
+ 
++static inline struct contract_scope_id contract_task_scope(struct task_struct *task)
++{
++	return (struct contract_scope_id){};
++}
++
++static inline struct contract_scope_id
++contract_memcg_scope(struct mem_cgroup *memcg)
++{
++	return (struct contract_scope_id){};
++}
++
++static inline struct contract_scope_id contract_current_memcg_scope(void)
++{
++	return (struct contract_scope_id){};
++}
++
++static inline struct contract_scope_id contract_folio_scope(struct folio *folio)
++{
++	return (struct contract_scope_id){};
++}
++
+ static inline void
+ contract_note_installed_token(const struct contract_effect_token *token)
+ {
+diff -urN m13-base/kernel/bpf/contractbpf_core.c m13-current/kernel/bpf/contractbpf_core.c
+--- m13-base/kernel/bpf/contractbpf_core.c	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/kernel/bpf/contractbpf_core.c	2026-05-22 13:30:00.000000000 +0000
+@@ -42,6 +42,34 @@
+ 	return NULL;
+ }
+ 
++u64 contract_effect_policy_id_for_scope(enum contract_effect_type effect,
++					struct contract_scope_id scope)
++{
++	unsigned long flags;
++	u64 prog_id = 0;
++	int i;
++
++	if (effect >= CONTRACT_EFFECT_MAX)
++		return 0;
++
++	spin_lock_irqsave(&contract_token_lock, flags);
++	for (i = 0; i < CONTRACT_MAX_TOKENS; i++) {
++		if (!contract_token_used[i])
++			continue;
++		if (contract_tokens[i].effect == effect &&
++		    contract_scope_equal(contract_tokens[i].scope, scope)) {
++			prog_id = contract_tokens[i].prog_id;
++			break;
++		}
++	}
++	spin_unlock_irqrestore(&contract_token_lock, flags);
++
++	if (prog_id)
++		return prog_id;
++
++	return contract_effect_policy_id(effect);
++}
++
+ int contract_register_token(const struct contract_effect_token *token)
+ {
+ 	struct contract_effect_token *existing;
+diff -urN m13-base/kernel/bpf/contractbpf_identity.c m13-current/kernel/bpf/contractbpf_identity.c
+--- m13-base/kernel/bpf/contractbpf_identity.c	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/kernel/bpf/contractbpf_identity.c	2026-05-22 13:30:00.000000000 +0000
+@@ -9,7 +9,11 @@
+  * before userspace installs manifests.
+  */
+ #include <linux/contractbpf.h>
++#include <linux/cgroup.h>
++#include <linux/memcontrol.h>
++#include <linux/rcupdate.h>
+ #include <linux/spinlock.h>
++#include <linux/sched.h>
+ 
+ #define CONTRACT_DEFAULT_SCOPE_TYPE 1
+ #define CONTRACT_DEFAULT_SCOPE_PRIMARY 1
+@@ -49,6 +53,17 @@
+ 	};
+ }
+ 
++static struct contract_scope_id contract_scope_from_cgroup_id(u64 cgroup_id)
++{
++	if (!cgroup_id)
++		return contract_default_scope();
++
++	return (struct contract_scope_id){
++		.type = CONTRACT_DEFAULT_SCOPE_TYPE,
++		.primary_id = cgroup_id,
++	};
++}
++
+ void contract_identity_reset_for_tests(void)
+ {
+ 	unsigned long flags;
+@@ -122,6 +137,67 @@
+ 	return scope;
+ }
+ 
++struct contract_scope_id contract_task_scope(struct task_struct *task)
++{
++	struct cgroup *cgrp;
++	u64 cgroup_id_value = 0;
++
++	if (!task)
++		return contract_service_scope();
++
++	rcu_read_lock();
++	cgrp = task_dfl_cgroup(task);
++	if (cgrp)
++		cgroup_id_value = cgroup_id(cgrp);
++	rcu_read_unlock();
++
++	if (!cgroup_id_value)
++		return contract_service_scope();
++
++	return contract_scope_from_cgroup_id(cgroup_id_value);
++}
++
++struct contract_scope_id contract_memcg_scope(struct mem_cgroup *memcg)
++{
++	u64 cgroup_id_value = 0;
++
++	if (memcg && memcg->css.cgroup)
++		cgroup_id_value = cgroup_id(memcg->css.cgroup);
++
++	if (!cgroup_id_value)
++		return contract_service_scope();
++
++	return contract_scope_from_cgroup_id(cgroup_id_value);
++}
++
++struct contract_scope_id contract_current_memcg_scope(void)
++{
++	struct contract_scope_id scope;
++	struct mem_cgroup *memcg;
++
++	memcg = get_mem_cgroup_from_current();
++	scope = contract_memcg_scope(memcg);
++	mem_cgroup_put(memcg);
++
++	return scope;
++}
++
++struct contract_scope_id contract_folio_scope(struct folio *folio)
++{
++	struct contract_scope_id scope;
++	struct mem_cgroup *memcg;
++
++	if (!folio)
++		return contract_current_memcg_scope();
++
++	rcu_read_lock();
++	memcg = folio_memcg_rcu(folio);
++	scope = contract_memcg_scope(memcg);
++	rcu_read_unlock();
++
++	return scope;
++}
++
+ struct contract_scope_id contract_service_scope(void)
+ {
+ 	struct contract_scope_id scope;
+diff -urN m13-base/kernel/bpf/contractbpf_sched.c m13-current/kernel/bpf/contractbpf_sched.c
+--- m13-base/kernel/bpf/contractbpf_sched.c	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/kernel/bpf/contractbpf_sched.c	2026-05-22 13:30:00.000000000 +0000
+@@ -17,11 +17,11 @@
+ 	return contract_effect_scope(CONTRACT_EFFECT_SCHED_DISPATCH);
+ }
+ 
+-static void contract_sched_install_tokens(void)
++static void contract_sched_install_tokens(struct contract_scope_id scope)
+ {
+-	struct contract_scope_id scope = contract_sched_scope();
+-	u64 boost_policy = contract_effect_policy_id(CONTRACT_EFFECT_SCHED_BOOST);
+-	u64 dispatch_policy = contract_effect_policy_id(CONTRACT_EFFECT_SCHED_DISPATCH);
++	u64 boost_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope);
++	u64 dispatch_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH,
++								  scope);
+ 	struct contract_effect_token boost = {
+ 		.prog_id = boost_policy,
+ 		.scope = scope,
+@@ -42,7 +42,7 @@
+ void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
+ 				 u64 *effective_slice)
+ {
+-	struct contract_scope_id scope = contract_sched_scope();
++	struct contract_scope_id scope = contract_task_scope(p);
+ 	struct contract_ledger *ledger;
+ 	u64 queue_delay_us = 0;
+ 	int ret;
+@@ -50,10 +50,10 @@
+ 	if (!contract_sched_gate_enabled)
+ 		return;
+ 
+-	contract_sched_install_tokens();
++	contract_sched_install_tokens(scope);
+ 
+ 	ret = contract_effect_gate(
+-				   contract_effect_policy_id(CONTRACT_EFFECT_SCHED_DISPATCH),
++				   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_DISPATCH, scope),
+ 				   CONTRACT_EFFECT_SCHED_DISPATCH, scope, 1, 0);
+ 	if (ret == CONTRACT_DENY)
+ 		contract_ledger_charge(scope,
+@@ -69,7 +69,7 @@
+ 		queue_delay_us = jiffies_to_usecs(jiffies - p->scx.runnable_at);
+ 
+ 	ret = contract_effect_gate(
+-				   contract_effect_policy_id(CONTRACT_EFFECT_SCHED_BOOST),
++				   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_SCHED_BOOST, scope),
+ 				   CONTRACT_EFFECT_SCHED_BOOST, scope, 1,
+ 				   queue_delay_us);
+ 	contract_cross_check(scope);
+@@ -100,6 +100,6 @@
+ 	enable = buf[0] != '0';
+ 	contract_sched_gate_enabled = enable;
+ 	if (enable)
+-		contract_sched_install_tokens();
++		contract_sched_install_tokens(contract_sched_scope());
+ 	return count;
+ }
+@@ -134,6 +134,6 @@
+ 
+ 	contract_sched_boost_budget = budget;
+ 	if (contract_sched_gate_enabled)
+-		contract_sched_install_tokens();
++		contract_sched_install_tokens(contract_sched_scope());
+ 	return count;
+ }
+diff -urN m13-base/kernel/bpf/contractbpf_mm.c m13-current/kernel/bpf/contractbpf_mm.c
+--- m13-base/kernel/bpf/contractbpf_mm.c	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/kernel/bpf/contractbpf_mm.c	2026-05-22 13:30:00.000000000 +0000
+@@ -38,11 +38,11 @@
+ 	atomic64_set(&contract_mm_simulation_runs, 0);
+ }
+ 
+-static void contract_mm_install_tokens(void)
++static void contract_mm_install_tokens(struct contract_scope_id scope)
+ {
+-	struct contract_scope_id scope = contract_mm_scope();
+-	u64 demote_policy = contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE);
+-	u64 reclaim_policy = contract_effect_policy_id(CONTRACT_EFFECT_MM_RECLAIM_HINT);
++	u64 demote_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope);
++	u64 reclaim_policy = contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_RECLAIM_HINT,
++								 scope);
+ 	struct contract_effect_token demote = {
+ 		.prog_id = demote_policy,
+ 		.scope = scope,
+@@ -61,26 +61,27 @@
+ 	contract_register_token(&reclaim_hint);
+ }
+ 
+-static void contract_mm_record_refault_pages(unsigned int nr_pages)
++static void contract_mm_record_refault_pages(struct contract_scope_id scope,
++					     unsigned int nr_pages)
+ {
+ 	struct contract_ledger *ledger;
+ 
+ 	if (!contract_mm_gate_enabled)
+ 		return;
+ 
+-	ledger = contract_lookup_ledger(contract_mm_scope());
++	ledger = contract_lookup_ledger(scope);
+ 	if (!ledger)
+ 		return;
+ 
+ 	atomic64_add(nr_pages ?: 1, &ledger->refault_events);
+-	contract_cross_check(contract_mm_scope());
++	contract_cross_check(scope);
+ }
+ 
+ static enum contract_mm_decision
+-contract_mm_validate_decision(enum contract_mm_decision decision,
++contract_mm_validate_decision(struct contract_scope_id scope,
++			      enum contract_mm_decision decision,
+ 			      unsigned int nr_pages)
+ {
+-	struct contract_scope_id scope = contract_mm_scope();
+ 	struct contract_ledger *ledger;
+ 	u32 degrade_state = CONTRACT_DEGRADE_REVOKE;
+ 	int ret;
+@@ -93,11 +95,11 @@
+ 
+ 	nr_pages = nr_pages ?: 1;
+-	contract_mm_install_tokens();
++	contract_mm_install_tokens(scope);
+ 
+ 	switch (decision) {
+ 	case CONTRACT_MM_DEMOTE:
+ 		ret = contract_effect_gate(
+-					   contract_effect_policy_id(CONTRACT_EFFECT_MM_DEMOTE_PAGE),
++					   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope),
+ 					   CONTRACT_EFFECT_MM_DEMOTE_PAGE,
+ 					   scope, nr_pages, 0);
+ 		if (ret == CONTRACT_ALLOW)
+@@ -116,7 +118,7 @@
+ 		return CONTRACT_MM_NO_OP;
+ 	case CONTRACT_MM_RECLAIM_HINT:
+ 		ret = contract_effect_gate(
+-					   contract_effect_policy_id(CONTRACT_EFFECT_MM_RECLAIM_HINT),
++					   contract_effect_policy_id_for_scope(CONTRACT_EFFECT_MM_RECLAIM_HINT, scope),
+ 					   CONTRACT_EFFECT_MM_RECLAIM_HINT,
+ 					   scope, 1, 0);
+ 		if (ret == CONTRACT_ALLOW)
+@@ -129,11 +131,12 @@
+ 	}
+ }
+ 
+-bool contract_mm_demote_allowed(unsigned int nr_pages)
++bool contract_mm_demote_allowed(struct folio *folio, unsigned int nr_pages)
+ {
+ 	enum contract_mm_decision decision;
++	struct contract_scope_id scope = contract_folio_scope(folio);
+ 
+-	decision = contract_mm_validate_decision(CONTRACT_MM_DEMOTE, nr_pages);
++	decision = contract_mm_validate_decision(scope, CONTRACT_MM_DEMOTE, nr_pages);
+ 	if (decision == CONTRACT_MM_DEMOTE)
+ 		return true;
+ 
+@@ -142,7 +145,8 @@
+ }
+ 
+ void contract_mm_record_refault(struct folio *folio)
+ {
+-	contract_mm_record_refault_pages(folio ? folio_nr_pages(folio) : 1);
++	contract_mm_record_refault_pages(contract_folio_scope(folio),
++					 folio ? folio_nr_pages(folio) : 1);
+ }
+ 
+@@ -153,11 +158,11 @@
+ 	if (!contract_mm_gate_enabled)
+ 		return;
+ 
+-	ledger = contract_lookup_ledger(contract_mm_scope());
++	ledger = contract_lookup_ledger(contract_current_memcg_scope());
+ 	if (!ledger)
+ 		return;
+ 
+ 	atomic64_inc(&ledger->major_fault_events);
+ 	atomic64_add(latency_us, &ledger->fault_latency_us);
+-	contract_cross_check(contract_mm_scope());
++	contract_cross_check(contract_current_memcg_scope());
+ }
+@@ -168,16 +174,17 @@
+ static void contract_mm_simulate_bad_demote(unsigned int iterations)
+ {
+ 	unsigned int i;
++	struct contract_scope_id scope = contract_mm_scope();
+ 
+ 	if (!iterations)
+ 		iterations = contract_mm_demote_budget + 4;
+ 
+ 	contract_mm_gate_enabled = true;
+-	contract_mm_install_tokens();
++	contract_mm_install_tokens(scope);
+ 
+ 	for (i = 0; i < iterations; i++) {
+-		if (contract_mm_validate_decision(CONTRACT_MM_DEMOTE, 1) ==
++		if (contract_mm_validate_decision(scope, CONTRACT_MM_DEMOTE, 1) ==
+ 		    CONTRACT_MM_DEMOTE) {
+-			contract_mm_record_refault_pages(1);
++			contract_mm_record_refault_pages(scope, 1);
+ 			contract_mm_record_major_fault(CONTRACT_MM_SIM_FAULT_LATENCY_US);
+ 		} else {
+ 			atomic64_inc(&contract_mm_no_op_decisions);
+diff -urN m13-base/mm/vmscan.c m13-current/mm/vmscan.c
+--- m13-base/mm/vmscan.c	2026-05-22 13:30:00.000000000 +0000
++++ m13-current/mm/vmscan.c	2026-05-22 13:30:00.000000000 +0000
+@@ -1005,4 +1005,5 @@
+ 	nodemask_t allowed_mask;
+ 	struct folio *folio;
++	struct folio *first_folio = NULL;
+ 
+ 	struct migration_target_control mtc = {
+@@ -1020,10 +1021,13 @@
+ 	if (target_nid == NUMA_NO_NODE)
+ 		return 0;
+ 
+-	list_for_each_entry(folio, demote_folios, lru)
++	list_for_each_entry(folio, demote_folios, lru) {
++		if (!first_folio)
++			first_folio = folio;
+ 		nr_pages += folio_nr_pages(folio);
++	}
+ 
+-	if (!contract_mm_demote_allowed(nr_pages))
++	if (!contract_mm_demote_allowed(first_folio, nr_pages))
+ 		return 0;
+ 
+ 	node_get_allowed_targets(pgdat, &allowed_mask);

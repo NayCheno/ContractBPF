@@ -7,9 +7,15 @@ mount -t devtmpfs devtmpfs /dev || true
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t debugfs debugfs /sys/kernel/debug
+mount -t cgroup2 cgroup2 /sys/fs/cgroup || true
+mkdir -p /sys/fs/cgroup/service-A 2>/dev/null || true
+echo $$ > /sys/fs/cgroup/service-A/cgroup.procs 2>/dev/null || true
 
-echo 2 > /sys/kernel/debug/contractbpf/sched_boost_budget
-echo 1 > /sys/kernel/debug/contractbpf/sched_gate_enable
+/usr/local/bin/contractctl \
+    --state-dir /tmp/sched-contract-state \
+    load /etc/contractbpf/service_a_sched.yaml > /tmp/contractctl_sched.log 2>&1
+cat /tmp/contractctl_sched.log
+
 cat /sys/kernel/debug/contractbpf/sched_snapshot
 
 /usr/local/bin/scx_contract_boost > /tmp/scx_contract_boost.log 2>&1 &
@@ -40,7 +46,9 @@ cat /tmp/sched_snapshot
 
 if grep -Eq 'violations=[1-9][0-9]*' /tmp/sched_snapshot &&
    grep -Eq 'throttled_boosts=[1-9][0-9]*' /tmp/sched_snapshot &&
-   grep -Eq 'boost_degrade_state=[1-9][0-9]*' /tmp/sched_snapshot; then
+   grep -Eq 'boost_degrade_state=[1-9][0-9]*' /tmp/sched_snapshot &&
+   grep -q 'policy_id=2934423261234883545' /tmp/sched_snapshot &&
+   grep -Eq 'scope=1:[2-9][0-9]*:0' /tmp/sched_snapshot; then
     echo CONTRACTBPF_SCHED_GATE_OK
     echo CONTRACTBPF_DEGRADE_OK
 else
@@ -73,4 +81,3 @@ if [ "$(cat /sys/kernel/sched_ext/state)" = "enabled" ]; then
 fi
 
 /bin/poweroff-contractbpf
-

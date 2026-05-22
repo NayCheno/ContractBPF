@@ -44,7 +44,7 @@ def main() -> int:
     configs = load_configs(config_dir)
     for config in configs.values():
         config["workload"] = "memcached"
-        config["evidence_scope"] = "qemu_memcached_controlled_effects"
+        config["evidence_scope"] = "qemu_memcached_ioctl_controlled"
 
     log_path = pathlib.Path(args.log) if args.log else run_qemu(root)
     if not log_path.is_absolute():
