@@ -1,0 +1,5 @@
+group: G5
+description: cgroup/memcg quota-style controls
+control_mode: cgroup_memcg
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

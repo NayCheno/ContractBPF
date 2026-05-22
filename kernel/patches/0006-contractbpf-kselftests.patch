@@ -1,0 +1,6 @@
+ContractBPF kselftest wiring was consolidated into
+0001-contractbpf-core-types-and-ledger.patch and extended by
+0004-contractbpf-mm-decision-hook.patch and
+0005-contractbpf-cross-subsystem-ledger.patch. This file is retained only to
+preserve the original blueprint slot and is intentionally not listed in
+kernel/patches/series.

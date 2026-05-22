@@ -1,0 +1,600 @@
+diff -urN base.copy/include/linux/contractbpf.h current/include/linux/contractbpf.h
+--- base.copy/include/linux/contractbpf.h	2026-05-21 18:32:02.171210760 +0000
++++ current/include/linux/contractbpf.h	2026-05-21 18:32:02.175210684 +0000
+@@ -6,6 +6,9 @@
+ #include <linux/errno.h>
+ #include <linux/types.h>
+ 
++struct dentry;
++struct task_struct;
++
+ enum contract_effect_type {
+ 	CONTRACT_EFFECT_SCHED_BOOST,
+ 	CONTRACT_EFFECT_SCHED_DISPATCH,
+@@ -54,6 +57,7 @@
+ struct contract_ledger {
+ 	struct contract_scope_id scope;
+ 	atomic64_t sched_queue_delay_us;
++	atomic64_t sched_dispatch_events;
+ 	atomic64_t sched_dispatch_failures;
+ 	atomic64_t sched_boost_events;
+ 	atomic64_t pages_demoted;
+@@ -76,6 +80,9 @@
+ void contract_trigger_degrade(u64 prog_id, enum contract_effect_type effect,
+ 			      struct contract_scope_id scope, const char *reason);
+ void contract_reset_for_tests(void);
++void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
++				 u64 *effective_slice);
++void contract_sched_debugfs_init(struct dentry *root);
+ struct contract_effect_token *contract_lookup_token(u64 prog_id,
+ 						    enum contract_effect_type effect,
+ 						    struct contract_scope_id scope);
+@@ -109,6 +116,16 @@
+ 					    const char *reason)
+ {
+ }
++
++static inline void contract_sched_ext_dispatch(struct task_struct *p,
++					       u64 requested_slice,
++					       u64 *effective_slice)
++{
++}
++
++static inline void contract_sched_debugfs_init(struct dentry *root)
++{
++}
+ #endif
+ 
+ #endif /* _LINUX_CONTRACTBPF_H */
+diff -urN base.copy/kernel/bpf/Makefile current/kernel/bpf/Makefile
+--- base.copy/kernel/bpf/Makefile	2026-05-21 18:32:02.180210588 +0000
++++ current/kernel/bpf/Makefile	2026-05-21 18:32:02.184210512 +0000
+@@ -7,7 +7,7 @@
+ CFLAGS_core.o += -Wno-override-init $(cflags-nogcse-yy)
+ 
+ obj-$(CONFIG_BPF_SYSCALL) += syscall.o verifier.o inode.o helpers.o tnum.o log.o token.o
+-obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o
++obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o
+ obj-$(CONFIG_BPF_SYSCALL) += bpf_iter.o map_iter.o task_iter.o prog_iter.o link_iter.o
+ obj-$(CONFIG_BPF_SYSCALL) += hashtab.o arraymap.o percpu_freelist.o bpf_lru_list.o lpm_trie.o map_in_map.o bloom_filter.o
+ obj-$(CONFIG_BPF_SYSCALL) += local_storage.o queue_stack_maps.o ringbuf.o
+diff -urN base.copy/kernel/bpf/contractbpf_core.c current/kernel/bpf/contractbpf_core.c
+--- base.copy/kernel/bpf/contractbpf_core.c	2026-05-21 18:32:02.189210416 +0000
++++ current/kernel/bpf/contractbpf_core.c	2026-05-21 18:32:02.193210340 +0000
+@@ -6,15 +6,15 @@
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+-#include <linux/mutex.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/spinlock.h>
+ #include <linux/string.h>
+ #include <linux/uaccess.h>
+ 
+ #define CONTRACT_MAX_TOKENS 64
+ 
+-static DEFINE_MUTEX(contract_token_lock);
++static DEFINE_SPINLOCK(contract_token_lock);
+ static struct contract_effect_token contract_tokens[CONTRACT_MAX_TOKENS];
+ static bool contract_token_used[CONTRACT_MAX_TOKENS];
+ static struct dentry *contract_debugfs_dir;
+@@ -47,17 +47,18 @@
+ int contract_register_token(const struct contract_effect_token *token)
+ {
+ 	struct contract_effect_token *existing;
++	unsigned long flags;
+ 	int i, free_slot = -1;
+ 
+ 	if (!token || token->effect >= CONTRACT_EFFECT_MAX)
+ 		return -EINVAL;
+ 
+-	mutex_lock(&contract_token_lock);
++	spin_lock_irqsave(&contract_token_lock, flags);
+ 	existing = contract_lookup_token(token->prog_id, token->effect,
+ 					 token->scope);
+ 	if (existing) {
+ 		*existing = *token;
+-		mutex_unlock(&contract_token_lock);
++		spin_unlock_irqrestore(&contract_token_lock, flags);
+ 		return 0;
+ 	}
+ 
+@@ -69,13 +70,13 @@
+ 	}
+ 
+ 	if (free_slot < 0) {
+-		mutex_unlock(&contract_token_lock);
++		spin_unlock_irqrestore(&contract_token_lock, flags);
+ 		return -ENOSPC;
+ 	}
+ 
+ 	contract_tokens[free_slot] = *token;
+ 	contract_token_used[free_slot] = true;
+-	mutex_unlock(&contract_token_lock);
++	spin_unlock_irqrestore(&contract_token_lock, flags);
+ 	return 0;
+ }
+ 
+@@ -90,15 +91,16 @@
+ 	struct contract_effect_token token_copy;
+ 	struct contract_effect_token *token;
+ 	struct contract_ledger *ledger;
++	unsigned long flags;
+ 
+-	mutex_lock(&contract_token_lock);
++	spin_lock_irqsave(&contract_token_lock, flags);
+ 	token = contract_lookup_token(prog_id, effect, scope);
+ 	if (!token) {
+-		mutex_unlock(&contract_token_lock);
++		spin_unlock_irqrestore(&contract_token_lock, flags);
+ 		return CONTRACT_DENY;
+ 	}
+ 	token_copy = *token;
+-	mutex_unlock(&contract_token_lock);
++	spin_unlock_irqrestore(&contract_token_lock, flags);
+ 
+ 	ledger = contract_lookup_ledger(scope);
+ 	if (!ledger)
+@@ -116,10 +118,12 @@
+ 
+ void contract_reset_for_tests(void)
+ {
+-	mutex_lock(&contract_token_lock);
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_token_lock, flags);
+ 	memset(contract_tokens, 0, sizeof(contract_tokens));
+ 	memset(contract_token_used, 0, sizeof(contract_token_used));
+-	mutex_unlock(&contract_token_lock);
++	spin_unlock_irqrestore(&contract_token_lock, flags);
+ 	contract_ledger_charge((struct contract_scope_id){}, CONTRACT_EFFECT_MAX,
+ 			       0, 0);
+ }
+@@ -205,6 +209,7 @@
+ 	contract_debugfs_dir = debugfs_create_dir("contractbpf", NULL);
+ 	debugfs_create_file("selftest", 0444, contract_debugfs_dir, NULL,
+ 			    &contract_selftest_fops);
++	contract_sched_debugfs_init(contract_debugfs_dir);
+ 	return 0;
+ }
+ late_initcall(contractbpf_init);
+diff -urN base.copy/kernel/bpf/contractbpf_ledger.c current/kernel/bpf/contractbpf_ledger.c
+--- base.copy/kernel/bpf/contractbpf_ledger.c	2026-05-21 18:32:02.197210263 +0000
++++ current/kernel/bpf/contractbpf_ledger.c	2026-05-21 18:32:02.202210168 +0000
+@@ -1,12 +1,12 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/contractbpf.h>
+ #include <linux/errno.h>
+-#include <linux/mutex.h>
++#include <linux/spinlock.h>
+ #include <linux/string.h>
+ 
+ #define CONTRACT_MAX_LEDGERS 64
+ 
+-static DEFINE_MUTEX(contract_ledger_lock);
++static DEFINE_SPINLOCK(contract_ledger_lock);
+ static struct contract_ledger contract_ledgers[CONTRACT_MAX_LEDGERS];
+ static bool contract_ledger_used[CONTRACT_MAX_LEDGERS];
+ 
+@@ -49,10 +49,11 @@
+ struct contract_ledger *contract_lookup_ledger(struct contract_scope_id scope)
+ {
+ 	struct contract_ledger *ledger;
++	unsigned long flags;
+ 
+-	mutex_lock(&contract_ledger_lock);
++	spin_lock_irqsave(&contract_ledger_lock, flags);
+ 	ledger = contract_get_or_create_ledger(scope);
+-	mutex_unlock(&contract_ledger_lock);
++	spin_unlock_irqrestore(&contract_ledger_lock, flags);
+ 	return ledger;
+ }
+ 
+@@ -63,7 +64,7 @@
+ 	case CONTRACT_EFFECT_SCHED_BOOST:
+ 		return atomic64_read(&ledger->sched_boost_events);
+ 	case CONTRACT_EFFECT_SCHED_DISPATCH:
+-		return atomic64_read(&ledger->sched_dispatch_failures);
++		return atomic64_read(&ledger->sched_dispatch_events);
+ 	case CONTRACT_EFFECT_MM_DEMOTE_PAGE:
+ 		return atomic64_read(&ledger->pages_demoted);
+ 	case CONTRACT_EFFECT_MM_RECLAIM_HINT:
+@@ -119,19 +120,20 @@
+ 			    u64 cost_secondary)
+ {
+ 	struct contract_ledger *ledger;
++	unsigned long flags;
+ 
+-	mutex_lock(&contract_ledger_lock);
++	spin_lock_irqsave(&contract_ledger_lock, flags);
+ 
+ 	if (effect >= CONTRACT_EFFECT_MAX) {
+ 		memset(contract_ledgers, 0, sizeof(contract_ledgers));
+ 		memset(contract_ledger_used, 0, sizeof(contract_ledger_used));
+-		mutex_unlock(&contract_ledger_lock);
++		spin_unlock_irqrestore(&contract_ledger_lock, flags);
+ 		return;
+ 	}
+ 
+ 	ledger = contract_get_or_create_ledger(scope);
+ 	if (!ledger) {
+-		mutex_unlock(&contract_ledger_lock);
++		spin_unlock_irqrestore(&contract_ledger_lock, flags);
+ 		return;
+ 	}
+ 
+@@ -141,7 +143,7 @@
+ 		atomic64_add(cost_secondary, &ledger->sched_queue_delay_us);
+ 		break;
+ 	case CONTRACT_EFFECT_SCHED_DISPATCH:
+-		atomic64_add(cost_primary, &ledger->sched_dispatch_failures);
++		atomic64_add(cost_primary, &ledger->sched_dispatch_events);
+ 		break;
+ 	case CONTRACT_EFFECT_MM_DEMOTE_PAGE:
+ 		atomic64_add(cost_primary, &ledger->pages_demoted);
+@@ -154,6 +156,5 @@
+ 		break;
+ 	}
+ 
+-	mutex_unlock(&contract_ledger_lock);
++	spin_unlock_irqrestore(&contract_ledger_lock, flags);
+ }
+-
+diff -urN base.copy/kernel/bpf/contractbpf_sched.c current/kernel/bpf/contractbpf_sched.c
+--- base.copy/kernel/bpf/contractbpf_sched.c	1970-01-01 00:00:00.000000000 +0000
++++ current/kernel/bpf/contractbpf_sched.c	2026-05-21 18:32:02.210210015 +0000
+@@ -0,0 +1,201 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/contractbpf.h>
++#include <linux/debugfs.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/jiffies.h>
++#include <linux/sched.h>
++#include <linux/sched/ext.h>
++#include <linux/seq_file.h>
++#include <linux/uaccess.h>
++
++#define CONTRACT_SCHED_SCOPE_TYPE 1
++#define CONTRACT_SCHED_SCOPE_PRIMARY 1
++#define CONTRACT_SCHED_PROG_ID 0
++
++static bool contract_sched_gate_enabled;
++static u64 contract_sched_boost_budget = 4;
++static atomic64_t contract_sched_throttled_boosts;
++
++static struct contract_scope_id contract_sched_scope(void)
++{
++	return (struct contract_scope_id){
++		.type = CONTRACT_SCHED_SCOPE_TYPE,
++		.primary_id = CONTRACT_SCHED_SCOPE_PRIMARY,
++	};
++}
++
++static void contract_sched_install_tokens(void)
++{
++	struct contract_scope_id scope = contract_sched_scope();
++	struct contract_effect_token boost = {
++		.prog_id = CONTRACT_SCHED_PROG_ID,
++		.scope = scope,
++		.effect = CONTRACT_EFFECT_SCHED_BOOST,
++		.budget_primary = contract_sched_boost_budget,
++		.degrade_state = CONTRACT_DEGRADE_THROTTLE,
++	};
++	struct contract_effect_token dispatch = {
++		.prog_id = CONTRACT_SCHED_PROG_ID,
++		.scope = scope,
++		.effect = CONTRACT_EFFECT_SCHED_DISPATCH,
++	};
++
++	contract_register_token(&boost);
++	contract_register_token(&dispatch);
++}
++
++void contract_sched_ext_dispatch(struct task_struct *p, u64 requested_slice,
++				 u64 *effective_slice)
++{
++	struct contract_scope_id scope = contract_sched_scope();
++	struct contract_ledger *ledger;
++	u64 queue_delay_us = 0;
++	int ret;
++
++	if (!contract_sched_gate_enabled)
++		return;
++
++	contract_sched_install_tokens();
++
++	ret = contract_effect_gate(CONTRACT_SCHED_PROG_ID,
++				   CONTRACT_EFFECT_SCHED_DISPATCH, scope, 1, 0);
++	if (ret == CONTRACT_DENY)
++		contract_ledger_charge(scope,
++				       CONTRACT_EFFECT_SCHED_DISPATCH, 1, 0);
++
++	if (!requested_slice || requested_slice <= SCX_SLICE_DFL)
++		return;
++
++	if (p->scx.runnable_at)
++		queue_delay_us = jiffies_to_usecs(jiffies - p->scx.runnable_at);
++
++	ret = contract_effect_gate(CONTRACT_SCHED_PROG_ID,
++				   CONTRACT_EFFECT_SCHED_BOOST, scope, 1,
++				   queue_delay_us);
++	if (ret == CONTRACT_ALLOW)
++		return;
++
++	ledger = contract_lookup_ledger(scope);
++	if (!ledger || ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST] >=
++		       CONTRACT_DEGRADE_THROTTLE) {
++		*effective_slice = SCX_SLICE_DFL;
++		atomic64_inc(&contract_sched_throttled_boosts);
++	}
++}
++
++static ssize_t contract_sched_enable_write(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	char buf[32];
++	bool enable;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	enable = buf[0] != '0';
++	contract_sched_gate_enabled = enable;
++	if (enable)
++		contract_sched_install_tokens();
++	return count;
++}
++
++static ssize_t contract_sched_enable_read(struct file *file,
++					  char __user *user_buf,
++					  size_t count, loff_t *ppos)
++{
++	char buf[4];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "%u\n", contract_sched_gate_enabled);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations contract_sched_enable_fops = {
++	.owner = THIS_MODULE,
++	.read = contract_sched_enable_read,
++	.write = contract_sched_enable_write,
++};
++
++static ssize_t contract_sched_budget_write(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	char buf[32];
++	int ret;
++	u64 budget;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	ret = kstrtou64(buf, 0, &budget);
++	if (ret)
++		return ret;
++
++	contract_sched_boost_budget = budget;
++	if (contract_sched_gate_enabled)
++		contract_sched_install_tokens();
++	return count;
++}
++
++static ssize_t contract_sched_budget_read(struct file *file,
++					  char __user *user_buf,
++					  size_t count, loff_t *ppos)
++{
++	char buf[32];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "%llu\n", contract_sched_boost_budget);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations contract_sched_budget_fops = {
++	.owner = THIS_MODULE,
++	.read = contract_sched_budget_read,
++	.write = contract_sched_budget_write,
++};
++
++static int contract_sched_snapshot_show(struct seq_file *seq, void *v)
++{
++	struct contract_scope_id scope = contract_sched_scope();
++	struct contract_ledger *ledger = contract_lookup_ledger(scope);
++
++	seq_printf(seq, "enabled=%u\n", contract_sched_gate_enabled);
++	seq_printf(seq, "boost_budget=%llu\n", contract_sched_boost_budget);
++	seq_printf(seq, "throttled_boosts=%lld\n",
++		   atomic64_read(&contract_sched_throttled_boosts));
++
++	if (!ledger)
++		return 0;
++
++	seq_printf(seq, "sched_dispatch_events=%lld\n",
++		   atomic64_read(&ledger->sched_dispatch_events));
++	seq_printf(seq, "sched_boost_events=%lld\n",
++		   atomic64_read(&ledger->sched_boost_events));
++	seq_printf(seq, "sched_queue_delay_us=%lld\n",
++		   atomic64_read(&ledger->sched_queue_delay_us));
++	seq_printf(seq, "violations=%lld\n",
++		   atomic64_read(&ledger->violations));
++	seq_printf(seq, "boost_degrade_state=%u\n",
++		   ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST]);
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(contract_sched_snapshot);
++
++void contract_sched_debugfs_init(struct dentry *root)
++{
++	debugfs_create_file("sched_gate_enable", 0600, root, NULL,
++			    &contract_sched_enable_fops);
++	debugfs_create_file("sched_boost_budget", 0600, root, NULL,
++			    &contract_sched_budget_fops);
++	debugfs_create_file("sched_snapshot", 0444, root, NULL,
++			    &contract_sched_snapshot_fops);
++}
+diff -urN base.copy/kernel/sched/ext.c current/kernel/sched/ext.c
+--- base.copy/kernel/sched/ext.c	2026-05-21 18:32:02.214209938 +0000
++++ current/kernel/sched/ext.c	2026-05-21 18:32:02.219209842 +0000
+@@ -8,6 +8,8 @@
+  */
+ #define SCX_OP_IDX(op)		(offsetof(struct sched_ext_ops, op) / sizeof(void (*)(void)))
+ 
++#include <linux/contractbpf.h>
++
+ enum scx_consts {
+ 	SCX_DSP_DFL_MAX_BATCH		= 32,
+ 	SCX_DSP_MAX_LOOPS		= 32,
+@@ -6168,11 +6170,15 @@
+ __bpf_kfunc void scx_bpf_dispatch(struct task_struct *p, u64 dsq_id, u64 slice,
+ 				  u64 enq_flags)
+ {
++	u64 effective_slice = slice;
++
+ 	if (!scx_dispatch_preamble(p, enq_flags))
+ 		return;
+ 
+-	if (slice)
+-		p->scx.slice = slice;
++	contract_sched_ext_dispatch(p, slice, &effective_slice);
++
++	if (effective_slice)
++		p->scx.slice = effective_slice;
+ 	else
+ 		p->scx.slice = p->scx.slice ?: 1;
+ 
+@@ -6199,11 +6205,15 @@
+ __bpf_kfunc void scx_bpf_dispatch_vtime(struct task_struct *p, u64 dsq_id,
+ 					u64 slice, u64 vtime, u64 enq_flags)
+ {
++	u64 effective_slice = slice;
++
+ 	if (!scx_dispatch_preamble(p, enq_flags))
+ 		return;
+ 
+-	if (slice)
+-		p->scx.slice = slice;
++	contract_sched_ext_dispatch(p, slice, &effective_slice);
++
++	if (effective_slice)
++		p->scx.slice = effective_slice;
+ 	else
+ 		p->scx.slice = p->scx.slice ?: 1;
+ 
+diff -urN base.copy/tools/sched_ext/Makefile current/tools/sched_ext/Makefile
+--- base.copy/tools/sched_ext/Makefile	2026-05-21 18:32:02.223209767 +0000
++++ current/tools/sched_ext/Makefile	2026-05-21 18:32:02.227209690 +0000
+@@ -176,7 +176,7 @@
+ 
+ SCX_COMMON_DEPS := include/scx/common.h include/scx/user_exit_info.h | $(BINDIR)
+ 
+-c-sched-targets = scx_simple scx_qmap scx_central scx_flatcg
++c-sched-targets = scx_simple scx_qmap scx_central scx_flatcg scx_contract_boost
+ 
+ $(addprefix $(BINDIR)/,$(c-sched-targets)): \
+ 	$(BINDIR)/%: \
+diff -urN base.copy/tools/sched_ext/scx_contract_boost.bpf.c current/tools/sched_ext/scx_contract_boost.bpf.c
+--- base.copy/tools/sched_ext/scx_contract_boost.bpf.c	1970-01-01 00:00:00.000000000 +0000
++++ current/tools/sched_ext/scx_contract_boost.bpf.c	2026-05-21 18:32:02.235209537 +0000
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Intentionally over-aggressive sched_ext policy for ContractBPF validation.
++ * It dispatches every task with a long slice so ContractBPF can throttle the
++ * boost effect without killing the scheduler.
++ */
++#include <scx/common.bpf.h>
++
++char _license[] SEC("license") = "GPL";
++
++#define CONTRACT_BOOST_SLICE_NS (200LLU * 1000 * 1000)
++
++UEI_DEFINE(uei);
++
++s32 BPF_STRUCT_OPS(contract_boost_select_cpu, struct task_struct *p,
++		   s32 prev_cpu, u64 wake_flags)
++{
++	bool is_idle = false;
++	s32 cpu;
++
++	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
++	if (is_idle)
++		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, CONTRACT_BOOST_SLICE_NS, 0);
++
++	return cpu;
++}
++
++void BPF_STRUCT_OPS(contract_boost_enqueue, struct task_struct *p, u64 enq_flags)
++{
++	scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, CONTRACT_BOOST_SLICE_NS, enq_flags);
++}
++
++void BPF_STRUCT_OPS(contract_boost_exit, struct scx_exit_info *ei)
++{
++	UEI_RECORD(uei, ei);
++}
++
++SCX_OPS_DEFINE(contract_boost_ops,
++	       .select_cpu	= (void *)contract_boost_select_cpu,
++	       .enqueue		= (void *)contract_boost_enqueue,
++	       .exit		= (void *)contract_boost_exit,
++	       .name		= "contract_boost");
++
+diff -urN base.copy/tools/sched_ext/scx_contract_boost.c current/tools/sched_ext/scx_contract_boost.c
+--- base.copy/tools/sched_ext/scx_contract_boost.c	1970-01-01 00:00:00.000000000 +0000
++++ current/tools/sched_ext/scx_contract_boost.c	2026-05-21 18:32:02.242209403 +0000
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#include <signal.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <bpf/bpf.h>
++#include <scx/common.h>
++#include "scx_contract_boost.bpf.skel.h"
++
++static volatile int exit_req;
++
++static void sigint_handler(int sig)
++{
++	exit_req = 1;
++}
++
++int main(int argc, char **argv)
++{
++	struct scx_contract_boost *skel;
++	struct bpf_link *link;
++	__u64 ecode;
++
++	signal(SIGINT, sigint_handler);
++	signal(SIGTERM, sigint_handler);
++
++	skel = SCX_OPS_OPEN(contract_boost_ops, scx_contract_boost);
++	SCX_OPS_LOAD(skel, contract_boost_ops, scx_contract_boost, uei);
++	link = SCX_OPS_ATTACH(skel, contract_boost_ops, scx_contract_boost);
++
++	while (!exit_req && !UEI_EXITED(skel, uei)) {
++		puts("contract_boost running");
++		fflush(stdout);
++		sleep(1);
++	}
++
++	bpf_link__destroy(link);
++	ecode = UEI_REPORT(skel, uei);
++	scx_contract_boost__destroy(skel);
++
++	return UEI_ECODE_RESTART(ecode) ? 2 : 0;
++}
++

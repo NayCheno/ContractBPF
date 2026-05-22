@@ -1,0 +1,5 @@
+group: G4
+description: sched_ext plus paging, no ledger
+control_mode: combined_no_ledger
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

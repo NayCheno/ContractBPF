@@ -1,0 +1,10 @@
+policy: bad_missing_fallback
+subsystem: mm
+scope:
+  type: memcg
+  id: service-A
+effects:
+  - name: demote_page
+    budget:
+      max_pages_per_epoch: 100000
+

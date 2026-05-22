@@ -1,0 +1,20 @@
+composition:
+  scope: service-A
+  coupled_effects:
+    - boost_task
+    - demote_page
+  invariant:
+    refault_ratio: "<= 2.0"
+    queue_delay_us: "<= 5000"
+    demote_rate_pages_per_epoch: "<= 100000"
+  violation:
+    if:
+      refault_ratio: "> 2.0"
+      queue_delay_us: "> 5000"
+    then:
+      revoke: demote_page
+      preserve:
+        - dispatch_task
+        - read_only_paging_observation
+      recovery_window_epochs: 3
+

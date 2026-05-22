@@ -1,0 +1,23 @@
+policy: phase_paging_A
+subsystem: mm
+scope:
+  type: memcg
+  id: service-A
+effects:
+  - name: demote_page
+    budget:
+      max_pages_per_epoch: 100000
+      max_refault_ratio: 2.0
+      max_fault_latency_us: 200
+    degrade:
+      level1: throttle_demote
+      level2: revoke_demote
+      level3: kernel_default_reclaim
+  - name: reclaim_hint
+    budget:
+      max_hints_per_epoch: 50000
+    degrade:
+      level1: ignore_hint
+      level2: revoke_reclaim_hint
+      level3: kernel_default_reclaim
+

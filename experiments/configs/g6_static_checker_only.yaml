@@ -1,0 +1,5 @@
+group: G6
+description: static checker only
+control_mode: static_checker_only
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

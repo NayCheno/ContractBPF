@@ -1,0 +1,435 @@
+diff -urN m6-base/include/linux/contractbpf.h m6-current/include/linux/contractbpf.h
+--- m6-base/include/linux/contractbpf.h	2026-05-21 19:01:36.412335273 +0000
++++ m6-current/include/linux/contractbpf.h	2026-05-21 19:03:28.842115196 +0000
+@@ -96,6 +96,9 @@
+ void contract_mm_record_refault(struct folio *folio);
+ void contract_mm_record_major_fault(u64 latency_us);
+ void contract_mm_debugfs_init(struct dentry *root);
++struct contract_scope_id contract_service_scope(void);
++void contract_cross_check(struct contract_scope_id scope);
++void contract_cross_debugfs_init(struct dentry *root);
+ struct contract_effect_token *contract_lookup_token(u64 prog_id,
+ 						    enum contract_effect_type effect,
+ 						    struct contract_scope_id scope);
+@@ -156,6 +159,19 @@
+ static inline void contract_mm_debugfs_init(struct dentry *root)
+ {
+ }
++
++static inline struct contract_scope_id contract_service_scope(void)
++{
++	return (struct contract_scope_id){};
++}
++
++static inline void contract_cross_check(struct contract_scope_id scope)
++{
++}
++
++static inline void contract_cross_debugfs_init(struct dentry *root)
++{
++}
+ #endif
+ 
+ #endif /* _LINUX_CONTRACTBPF_H */
+diff -urN m6-base/kernel/bpf/Makefile m6-current/kernel/bpf/Makefile
+--- m6-base/kernel/bpf/Makefile	2026-05-21 19:01:36.414335233 +0000
++++ m6-current/kernel/bpf/Makefile	2026-05-21 19:03:28.843115176 +0000
+@@ -7,7 +7,7 @@
+ CFLAGS_core.o += -Wno-override-init $(cflags-nogcse-yy)
+ 
+ obj-$(CONFIG_BPF_SYSCALL) += syscall.o verifier.o inode.o helpers.o tnum.o log.o token.o
+-obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o contractbpf_mm.o
++obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o contractbpf_sched.o contractbpf_mm.o contractbpf_cross.o
+ obj-$(CONFIG_BPF_SYSCALL) += bpf_iter.o map_iter.o task_iter.o prog_iter.o link_iter.o
+ obj-$(CONFIG_BPF_SYSCALL) += hashtab.o arraymap.o percpu_freelist.o bpf_lru_list.o lpm_trie.o map_in_map.o bloom_filter.o
+ obj-$(CONFIG_BPF_SYSCALL) += local_storage.o queue_stack_maps.o ringbuf.o
+diff -urN m6-base/kernel/bpf/contractbpf_core.c m6-current/kernel/bpf/contractbpf_core.c
+--- m6-base/kernel/bpf/contractbpf_core.c	2026-05-21 19:01:36.415335214 +0000
++++ m6-current/kernel/bpf/contractbpf_core.c	2026-05-21 19:03:28.845115137 +0000
+@@ -211,6 +211,7 @@
+ 			    &contract_selftest_fops);
+ 	contract_sched_debugfs_init(contract_debugfs_dir);
+ 	contract_mm_debugfs_init(contract_debugfs_dir);
++	contract_cross_debugfs_init(contract_debugfs_dir);
+ 	return 0;
+ }
+ late_initcall(contractbpf_init);
+diff -urN m6-base/kernel/bpf/contractbpf_cross.c m6-current/kernel/bpf/contractbpf_cross.c
+--- m6-base/kernel/bpf/contractbpf_cross.c	1970-01-01 00:00:00.000000000 +0000
++++ m6-current/kernel/bpf/contractbpf_cross.c	2026-05-21 19:10:14.901140345 +0000
+@@ -0,0 +1,263 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/contractbpf.h>
++#include <linux/debugfs.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/seq_file.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++#define CONTRACT_SERVICE_SCOPE_TYPE 1
++#define CONTRACT_SERVICE_SCOPE_PRIMARY 1
++#define CONTRACT_CROSS_REFAULT_THRESHOLD 2
++#define CONTRACT_CROSS_QUEUE_DELAY_US 5000
++#define CONTRACT_CROSS_DEMOTE_THRESHOLD 0
++#define CONTRACT_CROSS_PROG_ID 0
++
++static DEFINE_SPINLOCK(contract_cross_audit_lock);
++static char contract_cross_last_audit[192] =
++	"reason=none revoke=none preserve=none";
++static bool contract_cross_rule_enabled = true;
++static atomic64_t contract_cross_unguarded_runs;
++static atomic64_t contract_cross_guarded_runs;
++
++struct contract_scope_id contract_service_scope(void)
++{
++	return (struct contract_scope_id){
++		.type = CONTRACT_SERVICE_SCOPE_TYPE,
++		.primary_id = CONTRACT_SERVICE_SCOPE_PRIMARY,
++	};
++}
++
++static void contract_cross_set_audit(struct contract_scope_id scope,
++				     const char *reason)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&contract_cross_audit_lock, flags);
++	scnprintf(contract_cross_last_audit, sizeof(contract_cross_last_audit),
++		  "scope=%u:%llu:%llu reason=%s revoke=demote_page preserve=sched_dispatch",
++		  scope.type, scope.primary_id, scope.secondary_id, reason);
++	spin_unlock_irqrestore(&contract_cross_audit_lock, flags);
++}
++
++void contract_cross_check(struct contract_scope_id scope)
++{
++	struct contract_ledger *ledger = contract_lookup_ledger(scope);
++	u64 refaults;
++	u64 queue_delay_us;
++	u64 pages_demoted;
++
++	if (!contract_cross_rule_enabled)
++		return;
++
++	if (!ledger)
++		return;
++
++	if (ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE] >=
++	    CONTRACT_DEGRADE_REVOKE)
++		return;
++
++	refaults = atomic64_read(&ledger->refault_events);
++	queue_delay_us = atomic64_read(&ledger->sched_queue_delay_us);
++	pages_demoted = atomic64_read(&ledger->pages_demoted);
++
++	if (refaults <= CONTRACT_CROSS_REFAULT_THRESHOLD ||
++	    queue_delay_us <= CONTRACT_CROSS_QUEUE_DELAY_US ||
++	    pages_demoted <= CONTRACT_CROSS_DEMOTE_THRESHOLD)
++		return;
++
++	contract_cross_set_audit(scope, "refault+queue_delay+demotion");
++	while (ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE] <
++	       CONTRACT_DEGRADE_REVOKE)
++		contract_trigger_degrade(CONTRACT_CROSS_PROG_ID,
++					 CONTRACT_EFFECT_MM_DEMOTE_PAGE, scope,
++					 "cross-subsystem invariant");
++}
++
++static int contract_cross_snapshot_show(struct seq_file *seq, void *v)
++{
++	struct contract_scope_id scope = contract_service_scope();
++	struct contract_ledger *ledger = contract_lookup_ledger(scope);
++	unsigned long flags;
++	char audit[sizeof(contract_cross_last_audit)];
++
++	seq_puts(seq, "rule=refault+queue_delay+demotion=>revoke_demote_page\n");
++	seq_printf(seq, "enabled=%u\n", contract_cross_rule_enabled);
++	seq_printf(seq, "scope=%u:%llu:%llu\n", scope.type, scope.primary_id,
++		   scope.secondary_id);
++	seq_printf(seq, "unguarded_runs=%lld\n",
++		   atomic64_read(&contract_cross_unguarded_runs));
++	seq_printf(seq, "guarded_runs=%lld\n",
++		   atomic64_read(&contract_cross_guarded_runs));
++
++	if (ledger) {
++		seq_printf(seq, "sched_queue_delay_us=%lld\n",
++			   atomic64_read(&ledger->sched_queue_delay_us));
++		seq_printf(seq, "pages_demoted=%lld\n",
++			   atomic64_read(&ledger->pages_demoted));
++		seq_printf(seq, "refault_events=%lld\n",
++			   atomic64_read(&ledger->refault_events));
++		seq_printf(seq, "violations=%lld\n",
++			   atomic64_read(&ledger->violations));
++		seq_printf(seq, "sched_degrade_state=%u\n",
++			   ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST]);
++		seq_printf(seq, "demote_degrade_state=%u\n",
++			   ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE]);
++	}
++
++	spin_lock_irqsave(&contract_cross_audit_lock, flags);
++	strscpy(audit, contract_cross_last_audit, sizeof(audit));
++	spin_unlock_irqrestore(&contract_cross_audit_lock, flags);
++	seq_printf(seq, "audit=%s\n", audit);
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(contract_cross_snapshot);
++
++static void contract_cross_charge_conflict(struct contract_scope_id scope)
++{
++	contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_DISPATCH, 4, 0);
++	contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_BOOST, 8, 12000);
++	contract_ledger_charge(scope, CONTRACT_EFFECT_MM_DEMOTE_PAGE, 8, 8);
++}
++
++static void contract_cross_run_scenario(bool guarded)
++{
++	struct contract_scope_id scope = contract_service_scope();
++
++	contract_reset_for_tests();
++	contract_cross_rule_enabled = guarded;
++	contract_cross_charge_conflict(scope);
++	contract_cross_check(scope);
++
++	if (guarded) {
++		atomic64_inc(&contract_cross_guarded_runs);
++	} else {
++		contract_cross_set_audit(scope,
++					 "unguarded feedback loop observed");
++		atomic64_inc(&contract_cross_unguarded_runs);
++	}
++}
++
++static ssize_t contract_cross_scenario_write(struct file *file,
++					     const char __user *user_buf,
++					     size_t count, loff_t *ppos)
++{
++	char buf[32];
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sysfs_streq(buf, "unguarded")) {
++		contract_cross_run_scenario(false);
++		return count;
++	}
++
++	if (sysfs_streq(buf, "guarded")) {
++		contract_cross_run_scenario(true);
++		return count;
++	}
++
++	if (sysfs_streq(buf, "reset")) {
++		contract_reset_for_tests();
++		contract_cross_rule_enabled = true;
++		atomic64_set(&contract_cross_unguarded_runs, 0);
++		atomic64_set(&contract_cross_guarded_runs, 0);
++		contract_cross_set_audit(contract_service_scope(), "reset");
++		return count;
++	}
++
++	return -EINVAL;
++}
++
++static const struct file_operations contract_cross_scenario_fops = {
++	.owner = THIS_MODULE,
++	.write = contract_cross_scenario_write,
++};
++
++static ssize_t contract_cross_enable_write(struct file *file,
++					   const char __user *user_buf,
++					   size_t count, loff_t *ppos)
++{
++	char buf[32];
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	contract_cross_rule_enabled = buf[0] != '0';
++	return count;
++}
++
++static ssize_t contract_cross_enable_read(struct file *file,
++					  char __user *user_buf, size_t count,
++					  loff_t *ppos)
++{
++	char buf[4];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "%u\n", contract_cross_rule_enabled);
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations contract_cross_enable_fops = {
++	.owner = THIS_MODULE,
++	.read = contract_cross_enable_read,
++	.write = contract_cross_enable_write,
++};
++
++static int contract_cross_selftest_show(struct seq_file *seq, void *v)
++{
++	struct contract_scope_id scope = contract_service_scope();
++	struct contract_ledger *ledger;
++
++	contract_reset_for_tests();
++	contract_cross_rule_enabled = true;
++	contract_ledger_charge(scope, CONTRACT_EFFECT_SCHED_BOOST, 2, 9000);
++	contract_ledger_charge(scope, CONTRACT_EFFECT_MM_DEMOTE_PAGE, 3, 3);
++	contract_cross_check(scope);
++
++	ledger = contract_lookup_ledger(scope);
++	if (!ledger) {
++		seq_puts(seq, "FAIL cross_ledger_lookup\n");
++		return 0;
++	}
++
++	if (ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE] <
++	    CONTRACT_DEGRADE_REVOKE) {
++		seq_printf(seq, "FAIL demote_not_revoked state=%u\n",
++			   ledger->degrade_state[CONTRACT_EFFECT_MM_DEMOTE_PAGE]);
++		return 0;
++	}
++
++	if (ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST]) {
++		seq_printf(seq, "FAIL sched_effect_degraded state=%u\n",
++			   ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST]);
++		return 0;
++	}
++
++	seq_puts(seq,
++		 "PASS cross_scope_shared revoke_demote preserve_sched_dispatch audit_event\n");
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(contract_cross_selftest);
++
++void contract_cross_debugfs_init(struct dentry *root)
++{
++	debugfs_create_file("cross_snapshot", 0444, root, NULL,
++			    &contract_cross_snapshot_fops);
++	debugfs_create_file("cross_rule_enable", 0600, root, NULL,
++			    &contract_cross_enable_fops);
++	debugfs_create_file("cross_scenario", 0200, root, NULL,
++			    &contract_cross_scenario_fops);
++	debugfs_create_file("cross_selftest", 0444, root, NULL,
++			    &contract_cross_selftest_fops);
++}
+diff -urN m6-base/kernel/bpf/contractbpf_mm.c m6-current/kernel/bpf/contractbpf_mm.c
+--- m6-base/kernel/bpf/contractbpf_mm.c	2026-05-21 19:01:36.418335154 +0000
++++ m6-current/kernel/bpf/contractbpf_mm.c	2026-05-21 19:03:28.848115077 +0000
+@@ -15,8 +15,6 @@
+ #include <linux/seq_file.h>
+ #include <linux/uaccess.h>
+ 
+-#define CONTRACT_MM_SCOPE_TYPE 2
+-#define CONTRACT_MM_SCOPE_PRIMARY 1
+ #define CONTRACT_MM_PROG_ID 0
+ #define CONTRACT_MM_SIM_FAULT_LATENCY_US 250
+ 
+@@ -30,10 +28,7 @@
+ 
+ static struct contract_scope_id contract_mm_scope(void)
+ {
+-	return (struct contract_scope_id){
+-		.type = CONTRACT_MM_SCOPE_TYPE,
+-		.primary_id = CONTRACT_MM_SCOPE_PRIMARY,
+-	};
++	return contract_service_scope();
+ }
+ 
+ static void contract_mm_reset_counters(void)
+@@ -77,6 +72,7 @@
+ 		return;
+ 
+ 	atomic64_add(nr_pages ?: 1, &ledger->refault_events);
++	contract_cross_check(contract_mm_scope());
+ }
+ 
+ static enum contract_mm_decision
+@@ -157,6 +153,7 @@
+ 
+ 	atomic64_inc(&ledger->major_fault_events);
+ 	atomic64_add(latency_us, &ledger->fault_latency_us);
++	contract_cross_check(contract_mm_scope());
+ }
+ 
+ static void contract_mm_simulate_bad_demote(unsigned int iterations)
+diff -urN m6-base/kernel/bpf/contractbpf_sched.c m6-current/kernel/bpf/contractbpf_sched.c
+--- m6-base/kernel/bpf/contractbpf_sched.c	2026-05-21 19:01:36.417335174 +0000
++++ m6-current/kernel/bpf/contractbpf_sched.c	2026-05-21 19:03:28.846115117 +0000
+@@ -9,8 +9,6 @@
+ #include <linux/seq_file.h>
+ #include <linux/uaccess.h>
+ 
+-#define CONTRACT_SCHED_SCOPE_TYPE 1
+-#define CONTRACT_SCHED_SCOPE_PRIMARY 1
+ #define CONTRACT_SCHED_PROG_ID 0
+ 
+ static bool contract_sched_gate_enabled;
+@@ -19,10 +17,7 @@
+ 
+ static struct contract_scope_id contract_sched_scope(void)
+ {
+-	return (struct contract_scope_id){
+-		.type = CONTRACT_SCHED_SCOPE_TYPE,
+-		.primary_id = CONTRACT_SCHED_SCOPE_PRIMARY,
+-	};
++	return contract_service_scope();
+ }
+ 
+ static void contract_sched_install_tokens(void)
+@@ -73,6 +68,7 @@
+ 	ret = contract_effect_gate(CONTRACT_SCHED_PROG_ID,
+ 				   CONTRACT_EFFECT_SCHED_BOOST, scope, 1,
+ 				   queue_delay_us);
++	contract_cross_check(scope);
+ 	if (ret == CONTRACT_ALLOW)
+ 		return;
+ 
+diff -urN m6-base/tools/testing/selftests/contractbpf/contractbpf_selftest.sh m6-current/tools/testing/selftests/contractbpf/contractbpf_selftest.sh
+--- m6-base/tools/testing/selftests/contractbpf/contractbpf_selftest.sh	2026-05-21 19:03:10.952468000 +0000
++++ m6-current/tools/testing/selftests/contractbpf/contractbpf_selftest.sh	2026-05-21 19:03:28.851115018 +0000
+@@ -5,6 +5,7 @@
+ DEBUGFS=/sys/kernel/debug
+ SELFTEST=$DEBUGFS/contractbpf/selftest
+ MM_SELFTEST=$DEBUGFS/contractbpf/mm_selftest
++CROSS_SELFTEST=$DEBUGFS/contractbpf/cross_selftest
+ 
+ if ! grep -q " $DEBUGFS " /proc/mounts 2>/dev/null; then
+ 	mount -t debugfs debugfs "$DEBUGFS" 2>/dev/null || true
+@@ -26,17 +27,20 @@
+ 	;;
+ esac
+ 
+-if [ -r "$MM_SELFTEST" ]; then
+-	mm_out="$(cat "$MM_SELFTEST")"
+-	echo "$mm_out"
+-	case "$mm_out" in
++for optional_selftest in "$MM_SELFTEST" "$CROSS_SELFTEST"; do
++	if [ ! -r "$optional_selftest" ]; then
++		continue
++	fi
++
++	optional_out="$(cat "$optional_selftest")"
++	echo "$optional_out"
++	case "$optional_out" in
+ 	PASS*)
+-		exit 0
+ 		;;
+ 	*)
+ 		exit 1
+ 		;;
+ 	esac
+-else
+-	exit 0
+-fi
++done
++
++exit 0

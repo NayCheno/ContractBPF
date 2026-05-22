@@ -1,0 +1,5 @@
+group: G7
+description: per-subsystem ledger only
+control_mode: per_subsystem_ledger
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

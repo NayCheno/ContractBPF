@@ -1,0 +1,16 @@
+# M1 toolchain requirements
+
+- `curl` or `wget`
+- `tar`
+- `make`
+- C compiler suitable for Linux x86_64
+- `bc`
+- `flex`
+- `bison`
+- `openssl` development headers
+- `elfutils` development headers
+- `pahole` / `dwarves` for `CONFIG_DEBUG_INFO_BTF`
+- `cpio`
+- `gzip`
+- `qemu-system-x86_64`
+

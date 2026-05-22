@@ -1,0 +1,5 @@
+group: G3
+description: BPF/PageFlex-style paging policy only
+control_mode: paging_only
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

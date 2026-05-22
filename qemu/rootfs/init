@@ -1,0 +1,5 @@
+#!/bin/sh
+echo CONTRACTBPF_BOOT_OK
+echo CONTRACTBPF_INITRAMFS_OK
+poweroff -f
+

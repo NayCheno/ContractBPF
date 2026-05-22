@@ -1,0 +1,5 @@
+group: G8
+description: kill-whole-policy fallback
+control_mode: whole_policy_fallback
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

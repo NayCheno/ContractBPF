@@ -1,0 +1,5 @@
+group: G2
+description: sched_ext policy only
+control_mode: sched_only
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

@@ -1,0 +1,4 @@
+service: redis
+scope: service-A
+port: 6379
+

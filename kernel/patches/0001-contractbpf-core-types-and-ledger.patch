@@ -1,0 +1,599 @@
+diff -urN a/include/linux/contractbpf.h b/include/linux/contractbpf.h
+--- a/include/linux/contractbpf.h	1970-01-01 00:00:00.000000000 +0000
++++ b/include/linux/contractbpf.h	2026-05-21 18:13:58.496748097 +0000
+@@ -0,0 +1,114 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_CONTRACTBPF_H
++#define _LINUX_CONTRACTBPF_H
++
++#include <linux/atomic.h>
++#include <linux/errno.h>
++#include <linux/types.h>
++
++enum contract_effect_type {
++	CONTRACT_EFFECT_SCHED_BOOST,
++	CONTRACT_EFFECT_SCHED_DISPATCH,
++	CONTRACT_EFFECT_SCHED_PIN_CPU,
++	CONTRACT_EFFECT_MM_DEMOTE_PAGE,
++	CONTRACT_EFFECT_MM_RECLAIM_HINT,
++	CONTRACT_EFFECT_MM_CLASSIFY_REGION,
++	CONTRACT_EFFECT_MAX,
++};
++
++enum contract_gate_result {
++	CONTRACT_DENY = -1,
++	CONTRACT_ALLOW = 0,
++	CONTRACT_DEGRADED = 1,
++};
++
++enum contract_degrade_action {
++	CONTRACT_DEGRADE_NONE,
++	CONTRACT_DEGRADE_THROTTLE,
++	CONTRACT_DEGRADE_REVOKE,
++	CONTRACT_DEGRADE_FALLBACK,
++	CONTRACT_DEGRADE_DISABLE_POLICY,
++};
++
++struct contract_scope_id {
++	u32 type;
++	u64 primary_id;
++	u64 secondary_id;
++};
++
++struct contract_effect_cost {
++	u64 primary;
++	u64 secondary;
++};
++
++struct contract_effect_token {
++	u64 prog_id;
++	struct contract_scope_id scope;
++	enum contract_effect_type effect;
++	u64 budget_primary;
++	u64 budget_secondary;
++	u64 epoch_ns;
++	u32 degrade_state;
++};
++
++struct contract_ledger {
++	struct contract_scope_id scope;
++	atomic64_t sched_queue_delay_us;
++	atomic64_t sched_dispatch_failures;
++	atomic64_t sched_boost_events;
++	atomic64_t pages_demoted;
++	atomic64_t refault_events;
++	atomic64_t major_fault_events;
++	atomic64_t fault_latency_us;
++	atomic64_t violations;
++	u64 current_epoch;
++	u32 degrade_state[CONTRACT_EFFECT_MAX];
++};
++
++#ifdef CONFIG_CONTRACTBPF
++int contract_register_token(const struct contract_effect_token *token);
++int contract_effect_gate(u64 prog_id, enum contract_effect_type effect,
++			 struct contract_scope_id scope, u64 cost_primary,
++			 u64 cost_secondary);
++void contract_ledger_charge(struct contract_scope_id scope,
++			    enum contract_effect_type effect, u64 cost_primary,
++			    u64 cost_secondary);
++void contract_trigger_degrade(u64 prog_id, enum contract_effect_type effect,
++			      struct contract_scope_id scope, const char *reason);
++void contract_reset_for_tests(void);
++struct contract_effect_token *contract_lookup_token(u64 prog_id,
++						    enum contract_effect_type effect,
++						    struct contract_scope_id scope);
++struct contract_ledger *contract_lookup_ledger(struct contract_scope_id scope);
++bool contract_would_exceed(struct contract_ledger *ledger,
++			   const struct contract_effect_token *token,
++			   struct contract_effect_cost cost);
++#else
++static inline int contract_register_token(const struct contract_effect_token *token)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int contract_effect_gate(u64 prog_id,
++				       enum contract_effect_type effect,
++				       struct contract_scope_id scope,
++				       u64 cost_primary, u64 cost_secondary)
++{
++	return CONTRACT_DENY;
++}
++
++static inline void contract_ledger_charge(struct contract_scope_id scope,
++					  enum contract_effect_type effect,
++					  u64 cost_primary, u64 cost_secondary)
++{
++}
++
++static inline void contract_trigger_degrade(u64 prog_id,
++					    enum contract_effect_type effect,
++					    struct contract_scope_id scope,
++					    const char *reason)
++{
++}
++#endif
++
++#endif /* _LINUX_CONTRACTBPF_H */
+diff -urN a/kernel/bpf/Kconfig b/kernel/bpf/Kconfig
+--- a/kernel/bpf/Kconfig	2025-05-22 12:29:54.000000000 +0000
++++ b/kernel/bpf/Kconfig	2026-05-21 18:13:58.521747632 +0000
+@@ -87,6 +87,16 @@
+ 
+ 	  If you are unsure how to answer this question, answer Y.
+ 
++config CONTRACTBPF
++	bool "ContractBPF resource-effect ledger prototype"
++	depends on BPF_SYSCALL
++	depends on DEBUG_FS
++	default n
++	help
++	  Enable the ContractBPF-Ledger prototype core. The initial
++	  implementation provides effect tokens, per-scope resource ledgers,
++	  effect-boundary gate helpers, and a debugfs-backed selftest hook.
++
+ source "kernel/bpf/preload/Kconfig"
+ 
+ config BPF_LSM
+diff -urN a/kernel/bpf/Makefile b/kernel/bpf/Makefile
+--- a/kernel/bpf/Makefile	2025-05-22 12:29:54.000000000 +0000
++++ b/kernel/bpf/Makefile	2026-05-21 18:13:58.525747557 +0000
+@@ -7,6 +7,7 @@
+ CFLAGS_core.o += -Wno-override-init $(cflags-nogcse-yy)
+ 
+ obj-$(CONFIG_BPF_SYSCALL) += syscall.o verifier.o inode.o helpers.o tnum.o log.o token.o
++obj-$(CONFIG_CONTRACTBPF) += contractbpf_core.o contractbpf_ledger.o contractbpf_degrade.o
+ obj-$(CONFIG_BPF_SYSCALL) += bpf_iter.o map_iter.o task_iter.o prog_iter.o link_iter.o
+ obj-$(CONFIG_BPF_SYSCALL) += hashtab.o arraymap.o percpu_freelist.o bpf_lru_list.o lpm_trie.o map_in_map.o bloom_filter.o
+ obj-$(CONFIG_BPF_SYSCALL) += local_storage.o queue_stack_maps.o ringbuf.o
+diff -urN a/kernel/bpf/contractbpf_core.c b/kernel/bpf/contractbpf_core.c
+--- a/kernel/bpf/contractbpf_core.c	1970-01-01 00:00:00.000000000 +0000
++++ b/kernel/bpf/contractbpf_core.c	2026-05-21 18:13:58.501748004 +0000
+@@ -0,0 +1,210 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/contractbpf.h>
++#include <linux/debugfs.h>
++#include <linux/errno.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++
++#define CONTRACT_MAX_TOKENS 64
++
++static DEFINE_MUTEX(contract_token_lock);
++static struct contract_effect_token contract_tokens[CONTRACT_MAX_TOKENS];
++static bool contract_token_used[CONTRACT_MAX_TOKENS];
++static struct dentry *contract_debugfs_dir;
++
++static bool contract_scope_equal(struct contract_scope_id a,
++				 struct contract_scope_id b)
++{
++	return a.type == b.type && a.primary_id == b.primary_id &&
++	       a.secondary_id == b.secondary_id;
++}
++
++struct contract_effect_token *contract_lookup_token(u64 prog_id,
++						    enum contract_effect_type effect,
++						    struct contract_scope_id scope)
++{
++	int i;
++
++	for (i = 0; i < CONTRACT_MAX_TOKENS; i++) {
++		if (!contract_token_used[i])
++			continue;
++		if (contract_tokens[i].prog_id == prog_id &&
++		    contract_tokens[i].effect == effect &&
++		    contract_scope_equal(contract_tokens[i].scope, scope))
++			return &contract_tokens[i];
++	}
++
++	return NULL;
++}
++
++int contract_register_token(const struct contract_effect_token *token)
++{
++	struct contract_effect_token *existing;
++	int i, free_slot = -1;
++
++	if (!token || token->effect >= CONTRACT_EFFECT_MAX)
++		return -EINVAL;
++
++	mutex_lock(&contract_token_lock);
++	existing = contract_lookup_token(token->prog_id, token->effect,
++					 token->scope);
++	if (existing) {
++		*existing = *token;
++		mutex_unlock(&contract_token_lock);
++		return 0;
++	}
++
++	for (i = 0; i < CONTRACT_MAX_TOKENS; i++) {
++		if (!contract_token_used[i]) {
++			free_slot = i;
++			break;
++		}
++	}
++
++	if (free_slot < 0) {
++		mutex_unlock(&contract_token_lock);
++		return -ENOSPC;
++	}
++
++	contract_tokens[free_slot] = *token;
++	contract_token_used[free_slot] = true;
++	mutex_unlock(&contract_token_lock);
++	return 0;
++}
++
++int contract_effect_gate(u64 prog_id, enum contract_effect_type effect,
++			 struct contract_scope_id scope, u64 cost_primary,
++			 u64 cost_secondary)
++{
++	struct contract_effect_cost cost = {
++		.primary = cost_primary,
++		.secondary = cost_secondary,
++	};
++	struct contract_effect_token token_copy;
++	struct contract_effect_token *token;
++	struct contract_ledger *ledger;
++
++	mutex_lock(&contract_token_lock);
++	token = contract_lookup_token(prog_id, effect, scope);
++	if (!token) {
++		mutex_unlock(&contract_token_lock);
++		return CONTRACT_DENY;
++	}
++	token_copy = *token;
++	mutex_unlock(&contract_token_lock);
++
++	ledger = contract_lookup_ledger(scope);
++	if (!ledger)
++		return CONTRACT_DENY;
++
++	if (contract_would_exceed(ledger, &token_copy, cost)) {
++		contract_trigger_degrade(prog_id, effect, scope,
++					 "budget exceeded");
++		return CONTRACT_DEGRADED;
++	}
++
++	contract_ledger_charge(scope, effect, cost_primary, cost_secondary);
++	return CONTRACT_ALLOW;
++}
++
++void contract_reset_for_tests(void)
++{
++	mutex_lock(&contract_token_lock);
++	memset(contract_tokens, 0, sizeof(contract_tokens));
++	memset(contract_token_used, 0, sizeof(contract_token_used));
++	mutex_unlock(&contract_token_lock);
++	contract_ledger_charge((struct contract_scope_id){}, CONTRACT_EFFECT_MAX,
++			       0, 0);
++}
++
++static int contract_run_selftest(char *buf, size_t size)
++{
++	struct contract_scope_id scope = {
++		.type = 1,
++		.primary_id = 42,
++		.secondary_id = 7,
++	};
++	struct contract_effect_token token = {
++		.prog_id = 100,
++		.scope = scope,
++		.effect = CONTRACT_EFFECT_SCHED_BOOST,
++		.budget_primary = 2,
++		.epoch_ns = 1000000000ULL,
++	};
++	struct contract_ledger *ledger;
++	int ret;
++
++	contract_reset_for_tests();
++
++	ret = contract_register_token(&token);
++	if (ret)
++		return scnprintf(buf, size, "FAIL register_token ret=%d\n", ret);
++
++	if (!contract_lookup_token(token.prog_id, token.effect, scope))
++		return scnprintf(buf, size, "FAIL token_lookup\n");
++
++	ret = contract_effect_gate(token.prog_id, token.effect, scope, 1, 0);
++	if (ret != CONTRACT_ALLOW)
++		return scnprintf(buf, size, "FAIL first_gate ret=%d\n", ret);
++
++	ret = contract_effect_gate(token.prog_id, token.effect, scope, 1, 0);
++	if (ret != CONTRACT_ALLOW)
++		return scnprintf(buf, size, "FAIL second_gate ret=%d\n", ret);
++
++	ret = contract_effect_gate(token.prog_id, token.effect, scope, 1, 0);
++	if (ret != CONTRACT_DEGRADED)
++		return scnprintf(buf, size, "FAIL degrade_gate ret=%d\n", ret);
++
++	ledger = contract_lookup_ledger(scope);
++	if (!ledger)
++		return scnprintf(buf, size, "FAIL ledger_lookup\n");
++
++	if (atomic64_read(&ledger->sched_boost_events) != 2)
++		return scnprintf(buf, size, "FAIL ledger_charge boost=%lld\n",
++				 atomic64_read(&ledger->sched_boost_events));
++
++	if (atomic64_read(&ledger->violations) != 1 ||
++	    ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST] !=
++		    CONTRACT_DEGRADE_THROTTLE)
++		return scnprintf(buf, size,
++				 "FAIL degrade_state violations=%lld state=%u\n",
++				 atomic64_read(&ledger->violations),
++				 ledger->degrade_state[CONTRACT_EFFECT_SCHED_BOOST]);
++
++	return scnprintf(buf, size,
++			 "PASS token_lookup ledger_charge degrade_transition\n");
++}
++
++static ssize_t contract_selftest_read(struct file *file, char __user *user_buf,
++				      size_t count, loff_t *ppos)
++{
++	char buf[256];
++	int len;
++
++	if (*ppos)
++		return 0;
++
++	len = contract_run_selftest(buf, sizeof(buf));
++	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
++}
++
++static const struct file_operations contract_selftest_fops = {
++	.owner = THIS_MODULE,
++	.read = contract_selftest_read,
++};
++
++static int __init contractbpf_init(void)
++{
++	contract_debugfs_dir = debugfs_create_dir("contractbpf", NULL);
++	debugfs_create_file("selftest", 0444, contract_debugfs_dir, NULL,
++			    &contract_selftest_fops);
++	return 0;
++}
++late_initcall(contractbpf_init);
+diff -urN a/kernel/bpf/contractbpf_degrade.c b/kernel/bpf/contractbpf_degrade.c
+--- a/kernel/bpf/contractbpf_degrade.c	1970-01-01 00:00:00.000000000 +0000
++++ b/kernel/bpf/contractbpf_degrade.c	2026-05-21 18:13:58.509747855 +0000
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/contractbpf.h>
++#include <linux/printk.h>
++
++void contract_trigger_degrade(u64 prog_id, enum contract_effect_type effect,
++			      struct contract_scope_id scope, const char *reason)
++{
++	struct contract_ledger *ledger;
++	u32 state;
++
++	if (effect >= CONTRACT_EFFECT_MAX)
++		return;
++
++	ledger = contract_lookup_ledger(scope);
++	if (!ledger)
++		return;
++
++	state = ledger->degrade_state[effect];
++	if (state < CONTRACT_DEGRADE_DISABLE_POLICY)
++		state++;
++	ledger->degrade_state[effect] = state;
++	atomic64_inc(&ledger->violations);
++
++	pr_info_ratelimited("contractbpf: prog=%llu effect=%u scope=%u:%llu:%llu degrade=%u reason=%s\n",
++			    prog_id, effect, scope.type, scope.primary_id,
++			    scope.secondary_id, state, reason ?: "unknown");
++}
++
+diff -urN a/kernel/bpf/contractbpf_ledger.c b/kernel/bpf/contractbpf_ledger.c
+--- a/kernel/bpf/contractbpf_ledger.c	1970-01-01 00:00:00.000000000 +0000
++++ b/kernel/bpf/contractbpf_ledger.c	2026-05-21 18:13:58.505747929 +0000
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/contractbpf.h>
++#include <linux/errno.h>
++#include <linux/mutex.h>
++#include <linux/string.h>
++
++#define CONTRACT_MAX_LEDGERS 64
++
++static DEFINE_MUTEX(contract_ledger_lock);
++static struct contract_ledger contract_ledgers[CONTRACT_MAX_LEDGERS];
++static bool contract_ledger_used[CONTRACT_MAX_LEDGERS];
++
++static bool contract_scope_equal(struct contract_scope_id a,
++				 struct contract_scope_id b)
++{
++	return a.type == b.type && a.primary_id == b.primary_id &&
++	       a.secondary_id == b.secondary_id;
++}
++
++static void contract_ledger_zero(struct contract_ledger *ledger,
++				 struct contract_scope_id scope)
++{
++	memset(ledger, 0, sizeof(*ledger));
++	ledger->scope = scope;
++}
++
++static struct contract_ledger *contract_get_or_create_ledger(struct contract_scope_id scope)
++{
++	int i, free_slot = -1;
++
++	for (i = 0; i < CONTRACT_MAX_LEDGERS; i++) {
++		if (!contract_ledger_used[i]) {
++			if (free_slot < 0)
++				free_slot = i;
++			continue;
++		}
++		if (contract_scope_equal(contract_ledgers[i].scope, scope))
++			return &contract_ledgers[i];
++	}
++
++	if (free_slot < 0)
++		return NULL;
++
++	contract_ledger_zero(&contract_ledgers[free_slot], scope);
++	contract_ledger_used[free_slot] = true;
++	return &contract_ledgers[free_slot];
++}
++
++struct contract_ledger *contract_lookup_ledger(struct contract_scope_id scope)
++{
++	struct contract_ledger *ledger;
++
++	mutex_lock(&contract_ledger_lock);
++	ledger = contract_get_or_create_ledger(scope);
++	mutex_unlock(&contract_ledger_lock);
++	return ledger;
++}
++
++static u64 contract_primary_value(const struct contract_ledger *ledger,
++				  enum contract_effect_type effect)
++{
++	switch (effect) {
++	case CONTRACT_EFFECT_SCHED_BOOST:
++		return atomic64_read(&ledger->sched_boost_events);
++	case CONTRACT_EFFECT_SCHED_DISPATCH:
++		return atomic64_read(&ledger->sched_dispatch_failures);
++	case CONTRACT_EFFECT_MM_DEMOTE_PAGE:
++		return atomic64_read(&ledger->pages_demoted);
++	case CONTRACT_EFFECT_MM_RECLAIM_HINT:
++	case CONTRACT_EFFECT_MM_CLASSIFY_REGION:
++	case CONTRACT_EFFECT_SCHED_PIN_CPU:
++	default:
++		return 0;
++	}
++}
++
++static u64 contract_secondary_value(const struct contract_ledger *ledger,
++				    enum contract_effect_type effect)
++{
++	switch (effect) {
++	case CONTRACT_EFFECT_SCHED_BOOST:
++		return atomic64_read(&ledger->sched_queue_delay_us);
++	case CONTRACT_EFFECT_MM_DEMOTE_PAGE:
++		return atomic64_read(&ledger->refault_events);
++	case CONTRACT_EFFECT_MM_RECLAIM_HINT:
++	case CONTRACT_EFFECT_MM_CLASSIFY_REGION:
++	case CONTRACT_EFFECT_SCHED_DISPATCH:
++	case CONTRACT_EFFECT_SCHED_PIN_CPU:
++	default:
++		return 0;
++	}
++}
++
++bool contract_would_exceed(struct contract_ledger *ledger,
++			   const struct contract_effect_token *token,
++			   struct contract_effect_cost cost)
++{
++	u64 primary;
++	u64 secondary;
++
++	if (!ledger || !token || token->effect >= CONTRACT_EFFECT_MAX)
++		return true;
++
++	primary = contract_primary_value(ledger, token->effect);
++	secondary = contract_secondary_value(ledger, token->effect);
++
++	if (token->budget_primary &&
++	    primary + cost.primary > token->budget_primary)
++		return true;
++	if (token->budget_secondary &&
++	    secondary + cost.secondary > token->budget_secondary)
++		return true;
++
++	return false;
++}
++
++void contract_ledger_charge(struct contract_scope_id scope,
++			    enum contract_effect_type effect, u64 cost_primary,
++			    u64 cost_secondary)
++{
++	struct contract_ledger *ledger;
++
++	mutex_lock(&contract_ledger_lock);
++
++	if (effect >= CONTRACT_EFFECT_MAX) {
++		memset(contract_ledgers, 0, sizeof(contract_ledgers));
++		memset(contract_ledger_used, 0, sizeof(contract_ledger_used));
++		mutex_unlock(&contract_ledger_lock);
++		return;
++	}
++
++	ledger = contract_get_or_create_ledger(scope);
++	if (!ledger) {
++		mutex_unlock(&contract_ledger_lock);
++		return;
++	}
++
++	switch (effect) {
++	case CONTRACT_EFFECT_SCHED_BOOST:
++		atomic64_add(cost_primary, &ledger->sched_boost_events);
++		atomic64_add(cost_secondary, &ledger->sched_queue_delay_us);
++		break;
++	case CONTRACT_EFFECT_SCHED_DISPATCH:
++		atomic64_add(cost_primary, &ledger->sched_dispatch_failures);
++		break;
++	case CONTRACT_EFFECT_MM_DEMOTE_PAGE:
++		atomic64_add(cost_primary, &ledger->pages_demoted);
++		atomic64_add(cost_secondary, &ledger->refault_events);
++		break;
++	case CONTRACT_EFFECT_MM_RECLAIM_HINT:
++	case CONTRACT_EFFECT_MM_CLASSIFY_REGION:
++	case CONTRACT_EFFECT_SCHED_PIN_CPU:
++	default:
++		break;
++	}
++
++	mutex_unlock(&contract_ledger_lock);
++}
++
+diff -urN a/tools/testing/selftests/contractbpf/Makefile b/tools/testing/selftests/contractbpf/Makefile
+--- a/tools/testing/selftests/contractbpf/Makefile	1970-01-01 00:00:00.000000000 +0000
++++ b/tools/testing/selftests/contractbpf/Makefile	2026-05-21 18:13:58.513747781 +0000
+@@ -0,0 +1,5 @@
++# SPDX-License-Identifier: GPL-2.0
++TEST_PROGS := contractbpf_selftest.sh
++
++include ../lib.mk
++
+diff -urN a/tools/testing/selftests/contractbpf/contractbpf_selftest.sh b/tools/testing/selftests/contractbpf/contractbpf_selftest.sh
+--- a/tools/testing/selftests/contractbpf/contractbpf_selftest.sh	1970-01-01 00:00:00.000000000 +0000
++++ b/tools/testing/selftests/contractbpf/contractbpf_selftest.sh	2026-05-21 18:13:58.517747706 +0000
+@@ -0,0 +1,28 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0
++
++KSFT_SKIP=4
++DEBUGFS=/sys/kernel/debug
++SELFTEST=$DEBUGFS/contractbpf/selftest
++
++if ! grep -q " $DEBUGFS " /proc/mounts 2>/dev/null; then
++	mount -t debugfs debugfs "$DEBUGFS" 2>/dev/null || true
++fi
++
++if [ ! -r "$SELFTEST" ]; then
++	echo "SKIP: $SELFTEST is not available"
++	exit "$KSFT_SKIP"
++fi
++
++out="$(cat "$SELFTEST")"
++echo "$out"
++
++case "$out" in
++PASS*)
++	exit 0
++	;;
++*)
++	exit 1
++	;;
++esac
++

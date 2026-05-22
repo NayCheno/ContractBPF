@@ -1,0 +1,8 @@
+0001-contractbpf-core-types-and-ledger.patch
+0002-contractbpf-sched-ext-effect-gate.patch
+0004-contractbpf-mm-decision-hook.patch
+0005-contractbpf-cross-subsystem-ledger.patch
+
+# Remaining planned patches:
+# 0003-contractbpf-bounded-degrade-controller.patch
+# 0006-contractbpf-kselftests.patch

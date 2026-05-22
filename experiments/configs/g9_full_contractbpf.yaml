@@ -1,0 +1,5 @@
+group: G9
+description: full ContractBPF-Ledger
+control_mode: full_contractbpf
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

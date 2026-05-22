@@ -1,0 +1,5 @@
+group: G1
+description: Linux default scheduler plus default paging
+control_mode: default
+workload: synthetic_phase_service
+evidence_scope: controlled_qemu_synthetic

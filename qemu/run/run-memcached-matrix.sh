@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+KERNEL="${CONTRACTBPF_KERNEL_IMAGE:-$ROOT/build/linux/arch/x86/boot/bzImage}"
+INITRD="${CONTRACTBPF_MEMCACHED_MATRIX_INITRD:-$ROOT/qemu/images/memcached-matrix-initramfs.cpio.gz}"
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+TIMEOUT="${QEMU_TIMEOUT:-180s}"
+LOG_DIR="$ROOT/artifacts/logs"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+LOG="$LOG_DIR/${STAMP}-qemu-memcached-matrix.log"
+
+mkdir -p "$LOG_DIR"
+
+if [ ! -f "$KERNEL" ]; then
+    echo "ERROR: kernel image missing: $KERNEL" >&2
+    exit 1
+fi
+
+if [ ! -f "$INITRD" ]; then
+    "$ROOT/qemu/rootfs/build-memcached-matrix-rootfs.sh"
+fi
+
+if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    echo "ERROR: qemu-system-x86_64 not found" >&2
+    exit 1
+fi
+
+KVM_ARGS=()
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    KVM_ARGS=(-enable-kvm -cpu host)
+else
+    KVM_ARGS=(-cpu max)
+fi
+
+CMD=(timeout "$TIMEOUT" "$QEMU_BIN" "${KVM_ARGS[@]}" \
+    -smp "${QEMU_SMP:-2}" \
+    -m "${QEMU_MEM:-2048}" \
+    -kernel "$KERNEL" \
+    -initrd "$INITRD" \
+    -append "console=ttyS0 panic=-1 nokaslr" \
+    -nographic \
+    -no-reboot)
+
+{
+    printf 'Command:'
+    printf ' %q' "${CMD[@]}"
+    printf '\n'
+} > "$LOG"
+
+set +e
+"${CMD[@]}" >> "$LOG" 2>&1
+status=$?
+set -e
+
+printf 'QEMU exit status: %s\n' "$status" >> "$LOG"
+
+for marker in CONTRACTBPF_BOOT_OK CONTRACTBPF_MEMCACHED_MATRIX_OK; do
+    if ! grep -qa "$marker" "$LOG"; then
+        echo "FAIL: $marker missing; log: $LOG" >&2
+        tail -n 200 "$LOG" >&2
+        exit 1
+    fi
+done
+
+for group in G1 G2 G3 G4 G5 G6 G7 G8 G9; do
+    if ! grep -qa "group=$group" "$LOG"; then
+        echo "FAIL: group $group missing; log: $LOG" >&2
+        tail -n 200 "$LOG" >&2
+        exit 1
+    fi
+done
+
+printf 'PASS: ContractBPF memcached matrix passed in %s\n' "$LOG"
