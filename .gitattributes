@@ -1,0 +1,15 @@
+* text=auto
+
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.mk text eol=lf
+*.expect text eol=lf
+*.patch text eol=lf
+*.config text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+kernel/patches/series text eol=lf
+
+*.pdf binary
+qemu/rootfs/init binary

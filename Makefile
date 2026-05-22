@@ -1,12 +1,16 @@
-.PHONY: bootstrap kernel sched-ext sched-boost bpf userspace kselftest qemu-smoke qemu-sched qemu-sched-gate qemu-mm-hook qemu-contractd qemu-conflict qemu-recovery qemu-experiment-matrix qemu-memcached qemu-memcached-matrix experiments memcached-experiments figures clean
+DOCKER_COMPOSE ?= docker compose
+DOCKER_SERVICE ?= contractbpf
+DOCKER_RUN = $(DOCKER_COMPOSE) run --rm $(DOCKER_SERVICE)
+
+.PHONY: bootstrap kernel sched-ext sched-boost bpf userspace kselftest qemu-smoke qemu-sched qemu-sched-gate qemu-mm-hook qemu-contractd qemu-conflict qemu-recovery qemu-experiment-matrix qemu-memcached qemu-memcached-matrix experiments memcached-experiments figures docker-build docker-shell docker-bootstrap docker-smoke docker-full clean
 
 bootstrap:
 	./kernel/scripts/fetch-linux.sh
-	./kernel/scripts/configure-kernel.sh
 	./qemu/rootfs/build-rootfs.sh
 
 kernel:
 	./kernel/scripts/apply-patches.sh
+	./kernel/scripts/configure-kernel.sh
 	./kernel/scripts/build-kernel.sh
 
 sched-ext:
@@ -98,6 +102,21 @@ figures:
 	python3 experiments/analysis/plot_recovery.py
 	python3 experiments/analysis/plot_ablation.py
 	python3 experiments/analysis/plot_overhead.py
+
+docker-build:
+	$(DOCKER_COMPOSE) build $(DOCKER_SERVICE)
+
+docker-shell:
+	$(DOCKER_RUN)
+
+docker-bootstrap:
+	$(DOCKER_RUN) make bootstrap
+
+docker-smoke:
+	$(DOCKER_RUN) make bootstrap kernel qemu-smoke
+
+docker-full:
+	$(DOCKER_RUN) make bootstrap kernel kselftest qemu-smoke qemu-sched qemu-sched-gate qemu-mm-hook qemu-contractd qemu-conflict qemu-recovery experiments memcached-experiments
 
 clean:
 	./kernel/scripts/clean-kernel.sh

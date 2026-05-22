@@ -1,0 +1,22 @@
+services:
+  contractbpf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: contractbpf-ubuntu:24.04
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    environment:
+      CARGO_HOME: /cargo
+      CONTRACTBPF_LINUX_DIR: /workspace/build/linux
+      RUST_BACKTRACE: "1"
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/build
+      - cargo-cache:/cargo
+    command: /bin/bash
+
+volumes:
+  build-cache:
+  cargo-cache:

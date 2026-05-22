@@ -53,6 +53,26 @@ metadata/
   source_notes.md                    External sources used while assembling the package.
 ```
 
+## Docker Ubuntu workflow
+
+The full kernel/QEMU/Rust/BPF artifact can be run in an Ubuntu 24.04 Docker
+workspace:
+
+```sh
+docker compose build
+docker compose run --rm contractbpf make bootstrap kernel qemu-smoke
+```
+
+Host-side Make shortcuts are also available:
+
+```sh
+make docker-build
+make docker-smoke
+```
+
+See `docs/implementation/docker.md` for the full prototype-gate command and
+optional KVM acceleration notes.
+
 ## Current status
 
 This is a **paper-planning and drafting package**, not a completed artifact. The LaTeX paper is written as a serious NSDI-facing draft with placeholders for measured results. The most important missing piece is a real implementation and convincing scheduler-paging conflict experiments on networked services.
