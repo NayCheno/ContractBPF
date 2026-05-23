@@ -24,6 +24,7 @@
 0026-contractbpf-ledger-stress-impl-fixup.patch
 0027-contractbpf-ledger-stress-closing-brace.patch
 0028-contractbpf-hotpath-timing-selftest.patch
+0029-contractbpf-native-lower-tier-node.patch
 
 # Remaining planned patches:
 # 0003-contractbpf-bounded-degrade-controller.patch

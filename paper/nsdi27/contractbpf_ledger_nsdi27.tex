@@ -42,7 +42,7 @@ We propose \emph{resource-effect safety} as a missing safety dimension for progr
 
 \sys answers these questions using three mechanisms. First, \emph{effect tokens} authorize a BPF policy to create specific effects, such as \texttt{boost\_task} or \texttt{demote\_page}, within a scope and budget. Second, \emph{per-scope resource ledgers} charge scheduler and paging effects to shared service scopes, connecting cgroup-level scheduling events and memcg-level memory events. Third, \emph{bounded degradation} throttles or revokes the smallest harmful effect that explains a violation.
 
-This paper targets NSDI because the motivating problem is not merely kernel extensibility. It is the stability of networked services whose resource-management policies are increasingly programmable. The current artifact starts with controlled QEMU validation and a memcached G1--G9 companion matrix; a submission-ready evaluation must still extend this to non-QEMU latency-sensitive services, multi-tenant pressure, and service-level recovery.
+This paper targets NSDI because the motivating problem is not merely kernel extensibility. It is the stability of networked services whose resource-management policies are increasingly programmable. The current artifact combines controlled QEMU validation, QEMU memcached matrices, and native non-QEMU VM memcached P5/P6 bars. A submission-ready evaluation still needs a broader bare-metal or CXL/PMEM campaign across latency-sensitive services, multi-tenant pressure, and service-level recovery.
 
 \paragraph{Contributions.}
 This paper makes four contributions:
@@ -315,9 +315,9 @@ claims.
 The natural-bars memcached run removes the controlled counter injection used by
 the companion matrix and instead drives real memory pressure in the QEMU guest.
 G4 naturally raises demotion, refault, and queue-delay counters, while G9
-reaches demote degrade state 2 and records a lower recovery-window P99. This is
-still QEMU evidence, so it does not replace the required non-QEMU P5/P6 final
-evaluation.
+reaches demote degrade state 2 and records a lower recovery-window P99. The
+native table above provides the current non-QEMU VM P5/P6 validation; the paper
+keeps QEMU and native VM evidence separate from bare-metal production claims.
 
 \input{generated/qemu_no_violation_overhead_table.tex}
 
@@ -331,7 +331,7 @@ triggered. Production overhead claims still require non-QEMU runs.
     \item The kernel patch series builds, QEMU boots, sched\_ext loads and unloads, contractd starts, and kselftests exercise token, ledger, degrade, MM hook, and cross-subsystem paths.
     \item The natural QEMU memory-pressure scenario records the feedback-loop counters needed for the thesis: queue delay, demotion, and refault or major-fault activity without \texttt{cross\_scenario} counter injection.
     \item The full \sys path detects the cross-subsystem condition and revokes only demote\_page while keeping scheduler dispatch active.
-    \item A real memcached service can run in QEMU across the full G1--G9 matrix and produce latency samples, but non-QEMU performance validation remains future work.
+    \item A real memcached service can run in QEMU across the full G1--G9 matrix, and the native non-QEMU VM run records same-load P5/P6 conflict and recovery bars.
 \end{enumerate}
 
 \section{Discussion}
@@ -346,7 +346,7 @@ Static checks can reject obvious manifest conflicts, but the motivating failure 
 
 \subsection{Why NSDI rather than a pure OS venue?}
 
-The mechanisms are kernel mechanisms, but the failure target is networked services. Programmable resource policies are becoming part of cloud service management, so a strong NSDI submission must emphasize multi-tenant service stability, tail latency, workload phases, and operational usefulness. The current artifact provides the kernel and QEMU evidence needed for that argument, but it still needs a broader real-service evaluation.
+The mechanisms are kernel mechanisms, but the failure target is networked services. Programmable resource policies are becoming part of cloud service management, so a strong NSDI submission must emphasize multi-tenant service stability, tail latency, workload phases, and operational usefulness. The current artifact provides kernel, QEMU, and native VM evidence for that argument, but it still needs a broader bare-metal real-service evaluation.
 
 \subsection{Limitations}
 
@@ -354,12 +354,13 @@ The mechanisms are kernel mechanisms, but the failure target is networked servic
 
 The current evaluation is also limited. QEMU validates kernel control flow,
 reproducibility, and failure recovery, but it is not evidence of production
-performance. The paging path is a conservative kernel-validated prototype, not
-the final PageFlex-style BPF loading path. The memcached matrix is a real
-networked-service validation in QEMU with controlled effect injection; it is
-not yet a non-QEMU performance study under realistic multi-tenant memory
-pressure. The paper must not claim submission-ready performance results until
-those experiments are added.
+performance. The native P5/P6 bars run on a VMware VM with an explicit
+ContractBPF lower-tier node model, so they provide non-QEMU final-evidence
+coverage for these gates without claiming bare-metal CXL/PMEM behavior. The
+paging path is a conservative kernel-validated prototype, not the final
+PageFlex-style BPF loading path. The paper must not claim submission-ready
+production performance until dedicated bare-metal multi-tenant experiments are
+added.
 
 \section{Related Work}
 

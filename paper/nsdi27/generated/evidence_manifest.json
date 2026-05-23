@@ -20,6 +20,11 @@
       "sha256": "1fa241066f7199b293fee7f34c1a9460156f0146c238cbc09cdc76f5e6aa1526",
       "source": "experiments/results/processed/no_violation_overhead.csv",
       "table": "paper/nsdi27/generated/qemu_no_violation_overhead_table.tex"
+    },
+    {
+      "sha256": "ff9d32659695b61dc29d5d76cb6c098da90beb81c10efe6ff16afbcd45f35e12",
+      "source": "experiments/results/processed/native_memcached_bars.csv",
+      "table": "paper/nsdi27/generated/native_memcached_bars_table.tex"
     }
   ]
 }

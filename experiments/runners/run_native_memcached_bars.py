@@ -32,9 +32,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value-a", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_VALUE_A", "16384")))
     parser.add_argument("--value-b", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_VALUE_B", "1024")))
     parser.add_argument("--file-mb", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_FILE_MB", "256")))
-    parser.add_argument("--pressure-mb", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_PRESSURE_MB", "2048")))
+    parser.add_argument("--pressure-mb", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_PRESSURE_MB", "3072")))
     parser.add_argument("--iterations", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_ITERATIONS", "2")))
     parser.add_argument("--memory-high", type=int, default=int(os.environ.get("CONTRACTBPF_NATIVE_MEMORY_HIGH", str(512 * 1024 * 1024))))
+    parser.add_argument(
+        "--recovery-sleep-s",
+        type=float,
+        default=float(os.environ.get("CONTRACTBPF_NATIVE_RECOVERY_SLEEP_S", "2.0")),
+    )
+    parser.add_argument(
+        "--conflict-warmup-s",
+        type=float,
+        default=float(os.environ.get("CONTRACTBPF_NATIVE_CONFLICT_WARMUP_S", "2.0")),
+    )
     return parser.parse_args()
 
 
@@ -56,6 +66,7 @@ class NativeRunner:
         self.paging_manifest = root / "bpf" / "contracts" / "service_a_paging.yaml"
         self.paging_norevoke_manifest = root / "bpf" / "contracts" / "service_a_paging_norevoke.yaml"
         self.pressure_file = Path(os.environ.get("CONTRACTBPF_NATIVE_PRESSURE_FILE", "/tmp/contractbpf-native-pressure.bin"))
+        self.pressure_mempolicy = os.environ.get("CONTRACTBPF_PRESSURE_MEMPOLICY", "bind")
         self.processes: List[subprocess.Popen[str]] = []
         self.scx_proc: Optional[subprocess.Popen[str]] = None
         self.memcached_a: Optional[subprocess.Popen[str]] = None
@@ -177,8 +188,14 @@ class NativeRunner:
         if self.memcached_a.poll() is not None or self.memcached_b.poll() is not None:
             raise RuntimeError("memcached failed to start")
 
-    def popen_in_cgroup(self, service: str, argv: List[str]) -> subprocess.Popen[str]:
-        proc = subprocess.Popen(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    def popen_in_cgroup(
+        self,
+        service: str,
+        argv: List[str],
+        *,
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.Popen[str]:
+        proc = subprocess.Popen(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         self.processes.append(proc)
         self.put_pid_in_cgroup(service, proc.pid)
         return proc
@@ -208,6 +225,8 @@ class NativeRunner:
 
     def start_pressure(self, label: str) -> subprocess.Popen[str]:
         path = Path(f"{self.pressure_file}.{label}")
+        env = os.environ.copy()
+        env["CONTRACTBPF_PRESSURE_MEMPOLICY"] = self.pressure_mempolicy
         return self.popen_in_cgroup(
             "service-A",
             [
@@ -217,6 +236,7 @@ class NativeRunner:
                 str(self.args.pressure_mb),
                 str(self.args.iterations),
             ],
+            env=env,
         )
 
     def begin_group(self, group: str, description: str) -> None:
@@ -267,9 +287,15 @@ class NativeRunner:
             pressure = self.start_pressure(f"{group}-prerecovery")
             pressure_out, _ = pressure.communicate()
             self.log.write(pressure_out or "")
+            if self.args.recovery_sleep_s > 0:
+                self.emit(f"recovery_sleep_s={self.args.recovery_sleep_s}")
+                time.sleep(self.args.recovery_sleep_s)
             self.run_load_pair(group)
         else:
             pressure = self.start_pressure(group)
+            if self.args.conflict_warmup_s > 0:
+                self.emit(f"conflict_warmup_s={self.args.conflict_warmup_s}")
+                time.sleep(self.args.conflict_warmup_s)
             self.run_load_pair(group)
             pressure_out, _ = pressure.communicate()
             self.log.write(pressure_out or "")
@@ -294,7 +320,10 @@ class NativeRunner:
             f"ops_a={self.args.ops_a} ops_b={self.args.ops_b} "
             f"value_a={self.args.value_a} value_b={self.args.value_b} "
             f"file_mb={self.args.file_mb} pressure_mb={self.args.pressure_mb} "
-            f"iterations={self.args.iterations} memory_high={self.args.memory_high}"
+            f"iterations={self.args.iterations} memory_high={self.args.memory_high} "
+            f"pressure_mempolicy={self.pressure_mempolicy} "
+            f"recovery_sleep_s={self.args.recovery_sleep_s} "
+            f"conflict_warmup_s={self.args.conflict_warmup_s}"
         )
         self.setup_cgroups()
         self.start_memcached()

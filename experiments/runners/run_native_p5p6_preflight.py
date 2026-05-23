@@ -122,6 +122,28 @@ def check_sched_ext() -> List[Dict[str, Any]]:
     ]
 
 
+def check_memory_tiering() -> List[Dict[str, Any]]:
+    tier_root = Path("/sys/devices/virtual/memory_tiering")
+    tiers = sorted(tier_root.glob("memory_tier*/nodelist"))
+    demotion_path = Path("/sys/kernel/mm/numa/demotion_enabled")
+    demotion_enabled = read_text(demotion_path)
+    tier_detail = ", ".join(f"{path.parent.name}:{read_text(path)}" for path in tiers) or "unavailable"
+    return [
+        check(
+            "memory_tiering_has_multiple_tiers",
+            True,
+            len(tiers) >= 2,
+            tier_detail,
+        ),
+        check(
+            "numa_demotion_enabled",
+            True,
+            demotion_enabled == "true",
+            f"{demotion_path} value={demotion_enabled or 'unavailable'}",
+        ),
+    ]
+
+
 def check_executable(name: str, path: Path) -> Dict[str, Any]:
     return check(name, True, path.exists() and os.access(path, os.X_OK), str(path))
 
@@ -187,6 +209,7 @@ def main() -> int:
     checks.extend(check_contract_device())
     checks.extend(check_cgroup())
     checks.extend(check_sched_ext())
+    checks.extend(check_memory_tiering())
     checks.extend(check_tools(root))
 
     required_failures = [row for row in checks if row["required"] and not row["ok"]]

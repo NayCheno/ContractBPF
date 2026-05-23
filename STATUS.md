@@ -4,6 +4,15 @@
 Maturation toward `ContractBPF_CCF_A_Mature_Tech_and_Acceptance_Gates.md`
 
 ## Last completed action
+- Change: completed the native non-QEMU P5/P6 path on the VMware VM and refreshed the final machine-readable audit.
+- Kernel/config: rebuilt and booted `6.12.30-contractbpf` from the VM's bootable Ubuntu config plus the ContractBPF/test-required options. The native kernel retains host drivers and adds `CONFIG_CONTRACTBPF=y`, `CONFIG_SCHED_CLASS_EXT=y`, `CONFIG_DEBUG_INFO_BTF=y`, `CONFIG_NUMA_EMU=y`, `CONFIG_MIGRATION=y`, `CONFIG_MEMORY_HOTPLUG=y`, `CONFIG_BLK_DEV_PMEM=y`, and `CONFIG_DEV_DAX_KMEM=y`.
+- Lower-tier model: added kernel patch `0029-contractbpf-native-lower-tier-node.patch` and booted with `contractbpf_lower_tier_node=2`. Sysfs/dmesg show `memory_tier4/nodelist=0-1`, `memory_tier22/nodelist=2`, `numa/demotion_enabled=true`, and demotion targets from nodes 0/1 to node2.
+- Native workload: `native-p5p6-bars` now records the pressure mempolicy (`bind_node0`), a G4 conflict warmup, and a G9 recovery settle window. `native-p5p6-preflight` now requires multiple memory tiers plus `numa_demotion_enabled=true`.
+- Native evidence: `experiments/results/processed/native_memcached_bars.csv`; raw log `experiments/results/raw/20260522T215525Z-native-memcached-bars.log`; preflight `artifacts/logs/20260522T215525Z-native-p5p6-preflight.log`; topology `artifacts/logs/20260522T215525Z-native-lower-tier-topology.log`.
+- Native result: G4 P99 `167208 us`, queue delay `225184000 us`, pages demoted `3520`, refaults `186268`, major faults `25258`; G9 P99 recovers to `18455 us`, keeps `sched_degrade_state=0`, and reaches `demote_degrade_state=2`.
+- Paper/evidence: generated `paper/nsdi27/generated/native_memcached_bars_table.tex`, updated paper wording so QEMU and native VM evidence are separated from bare-metal/production claims, and archived `experiments/artifact_bundles/20260522T220211Z.tar.zst`.
+- Verification: `docker compose run --rm contractbpf make acceptance-audit-tests` passed; final `docker compose run --rm contractbpf make archive-repro acceptance-audit` passed with P0-P8 complete (`CONTRACTBPF_ACCEPTANCE_AUDIT_OK`, timestamp `20260522T220242Z`).
+- Boundary: the final P5/P6 evidence is a native non-QEMU VMware VM lower-tier model. It is not claimed as bare-metal CXL/PMEM production performance evidence.
 - Change: added `experiments/tests/test_acceptance_gate_audit.py` and `make acceptance-audit-tests` for native evidence provenance fixtures.
 - Command: `docker compose run --rm contractbpf make acceptance-audit-tests`
 - Result: PASS

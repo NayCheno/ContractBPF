@@ -268,7 +268,7 @@ The current QEMU artifact shows four results:
     \item The kernel patch series builds, QEMU boots, sched\_ext loads and unloads, and kselftests exercise token, ledger, degrade, MM hook, and cross-subsystem paths.
     \item The natural QEMU memory-pressure scenario records page demotion, refaults or major faults, and scheduler queue delay without controlled counter injection.
     \item \sys detects the cross-subsystem violation and revokes the harmful demote\_page effect while preserving scheduler dispatch.
-    \item The QEMU memcached natural-bars proxy records a high-P99 conflict window and a lower-P99 recovery window, but non-QEMU performance validation remains future work.
+    \item The QEMU memcached natural-bars proxy records a high-P99 conflict window and a lower-P99 recovery window, and the native non-QEMU VM run records same-load P5/P6 bars for the current final-evidence gate.
 \end{enumerate}
 
 \section{Discussion}
@@ -287,7 +287,7 @@ The mechanisms are kernel mechanisms, but the failure and evaluation target netw
 
 \subsection{Limitations}
 
-\sys currently targets sched\_ext and paging. It does not handle all BPF program types, does not replace the verifier, and does not prove global optimality of resource policies. Threshold selection and scope mapping require careful configuration. The current evaluation is QEMU-only and must not be read as bare-metal or production performance evidence.
+\sys currently targets sched\_ext and paging. It does not handle all BPF program types, does not replace the verifier, and does not prove global optimality of resource policies. Threshold selection and scope mapping require careful configuration. The current evaluation includes QEMU correctness evidence and native non-QEMU VM P5/P6 bars, but it must not be read as bare-metal or production performance evidence.
 
 \section{Related Work}
 

@@ -1,0 +1,59 @@
+diff -urN m29-base/mm/memory-tiers.c m29-current/mm/memory-tiers.c
+--- m29-base/mm/memory-tiers.c	2026-05-22 00:00:00.000000000 +0000
++++ m29-current/mm/memory-tiers.c	2026-05-22 00:00:00.000000000 +0000
+@@ -1,7 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0
++#include <linux/init.h>
++#include <linux/kernel.h>
+ #include <linux/slab.h>
+ #include <linux/lockdep.h>
+ #include <linux/sysfs.h>
+ #include <linux/kobject.h>
+ #include <linux/memory.h>
+ #include <linux/memory-tiers.h>
+@@ -42,6 +44,29 @@
+ struct memory_dev_type *default_dram_type;
+ nodemask_t default_dram_nodes __initdata = NODE_MASK_NONE;
+ 
++#define CONTRACTBPF_LOWER_TIER_ADISTANCE	(MEMTIER_ADISTANCE_DRAM * 5)
++
++static int contractbpf_lower_tier_node = NUMA_NO_NODE;
++
++static int __init contractbpf_lower_tier_node_setup(char *str)
++{
++	const char *value = str ? str : "<null>";
++	int node;
++
++	if (!str || kstrtoint(str, 0, &node) || node < 0 ||
++	    node >= MAX_NUMNODES) {
++		pr_warn("memory-tiers: ignoring invalid contractbpf_lower_tier_node=%s\n",
++			value);
++		return 0;
++	}
++
++	contractbpf_lower_tier_node = node;
++	pr_info("memory-tiers: ContractBPF lower-tier node override set to node %d\n",
++		node);
++	return 0;
++}
++early_param("contractbpf_lower_tier_node", contractbpf_lower_tier_node_setup);
++
+ static const struct bus_type memory_tier_subsys = {
+ 	.name = "memory_tiering",
+ 	.dev_name = "memory_tier",
+@@ -542,7 +565,14 @@
+ 	if (!node_state(node, N_MEMORY))
+ 		return ERR_PTR(-EINVAL);
+ 
+-	mt_calc_adistance(node, &adist);
++	if (node == contractbpf_lower_tier_node) {
++		adist = CONTRACTBPF_LOWER_TIER_ADISTANCE;
++		pr_info_once("memory-tiers: ContractBPF lower-tier node %d using abstract distance %d\n",
++			     node, adist);
++	} else {
++		mt_calc_adistance(node, &adist);
++	}
++
+ 	if (!node_memory_types[node].memtype) {
+ 		memtype = mt_find_alloc_memory_type(adist, &default_memory_types);
+ 		if (IS_ERR(memtype)) {

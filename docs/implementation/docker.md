@@ -69,10 +69,11 @@ make docker-full
 
 P5/P6 final mature-gate evidence requires a non-QEMU host kernel with
 ContractBPF loaded, `/dev/contractbpf` exposed to the container, writable
-cgroup v2 service scopes, and sched_ext state visible from the container. Check
-that host attachment before attempting native same-load service runs. On a
-compatible Linux host, use the native override so the container runs privileged
-with host cgroups, debugfs, kernel modules, and sched_ext visibility:
+cgroup v2 service scopes, sched_ext state visible from the container, multiple
+memory tiers, and `numa/demotion_enabled=true`. Check that host attachment
+before attempting native same-load service runs. On a compatible Linux host,
+use the native override so the container runs privileged with host cgroups,
+debugfs, kernel modules, and sched_ext visibility:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.native.yml run --rm contractbpf make native-p5p6-preflight
@@ -172,8 +173,9 @@ markers in the native evidence.
 
 When native evidence exists, `make paper-tables` also emits
 `paper/nsdi27/generated/native_memcached_bars_table.tex`, and P8 requires that
-generated table plus updated paper claim scope. Stale future-work language about
-missing non-QEMU evidence keeps P8 partial after native bars pass.
+generated table plus updated paper claim scope. Stale paper language that still
+describes non-QEMU P5/P6 evidence as absent keeps P8 partial after native bars
+pass.
 
 The native provenance checks have fixture tests:
 

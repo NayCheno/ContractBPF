@@ -75,21 +75,21 @@ optional KVM acceleration notes.
 
 ## Current status
 
-This repository now contains a working QEMU artifact, not just a paper plan. The
-artifact builds a patched kernel, exercises sched_ext and a conservative
-paging-effect hook, and validates the current ContractBPF mechanism with QEMU
-synthetic and memcached matrices. These results are correctness and
-reproducibility evidence, not bare-metal or production performance evidence.
-The most important missing piece is still non-QEMU same-load quantitative
-evidence for latency-sensitive networked services, followed by a final
-paper/evidence audit against those runs.
+This repository now contains a working QEMU artifact and native non-QEMU VM
+P5/P6 evidence, not just a paper plan. The artifact builds a patched kernel,
+exercises sched_ext and a conservative paging-effect hook, validates the
+ContractBPF mechanism with QEMU synthetic and memcached matrices, and records
+same-load memcached conflict/recovery bars on a VMware VM with an explicit
+lower-tier node model. These results satisfy the repository's current
+machine-readable P0-P8 gate, but they are not bare-metal CXL/PMEM or production
+performance evidence.
 
 ## Recommended immediate decision
 
 Proceed toward NSDI 2027 Fall only if the team can produce by **2026-08-21**:
 
-1. same-load non-QEMU/bare-metal P5 conflict bars for a latency-sensitive networked service,
-2. same-load non-QEMU/bare-metal P6 bounded-degradation recovery bars,
+1. dedicated bare-metal or CXL/PMEM P5 conflict bars for latency-sensitive networked services,
+2. dedicated bare-metal or CXL/PMEM P6 bounded-degradation recovery bars,
 3. production-like no-violation overhead and scalability measurements,
 4. a final archive tying raw logs, processed data, figures, and paper claims together,
 5. a paper audit that does not conflate QEMU correctness evidence with production performance.

@@ -19,6 +19,10 @@
 #define MPOL_PREFERRED 1
 #endif
 
+#ifndef MPOL_BIND
+#define MPOL_BIND 2
+#endif
+
 static long parse_long(const char *value, long fallback)
 {
     char *end = NULL;
@@ -55,11 +59,20 @@ static void bind_cpu0(void)
 
 static void prefer_node0(void)
 {
+    const char *policy = getenv("CONTRACTBPF_PRESSURE_MEMPOLICY");
     unsigned long mask = 1UL;
+    int mode = MPOL_PREFERRED;
 
-    if (syscall(SYS_set_mempolicy, MPOL_PREFERRED, &mask, 8 * sizeof(mask)))
+    if (policy && strcmp(policy, "bind") == 0)
+        mode = MPOL_BIND;
+
+    if (syscall(SYS_set_mempolicy, mode, &mask, 8 * sizeof(mask))) {
         fprintf(stderr, "memory_pressure: set_mempolicy node0 failed: %s\n",
                 strerror(errno));
+    } else {
+        printf("MEMORY_PRESSURE_MEMPOLICY=%s_node0\n",
+               mode == MPOL_BIND ? "bind" : "preferred");
+    }
 }
 
 static void touch_range(unsigned char *buf, size_t len, unsigned int salt)
